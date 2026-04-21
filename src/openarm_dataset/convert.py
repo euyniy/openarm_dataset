@@ -32,9 +32,32 @@ def main():
         help="Path of converted OpenArm dataset",
         type=pathlib.Path,
     )
+    parser.add_argument(
+        "--format",
+        help="Format of the output dataset (default :openarm)",
+        default="openarm",
+        choices=["openarm", "lerobotv21"],
+    )
+    parser.add_argument(
+        "--smoothing-cutoff",
+        help="Cutoff frequency for smoothing (default: 1.0) if the output format is lerobotv21",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--train-split",
+        help="Split ratio for training dataset (default: 0.8) if the output format is lerobotv21",
+        type=float,
+        default=0.8,
+    )
     args = parser.parse_args()
     old_dataset = openarm_dataset.Dataset(args.input)
-    old_dataset.write(args.output)
+    old_dataset.write(
+        args.output,
+        format=args.format,
+        smoothing_cutoff=args.smoothing_cutoff,
+        train_split=args.train_split,
+    )
 
 
 if __name__ == "__main__":

@@ -327,11 +327,22 @@ class Dataset:
         filtered_values = signal.filtfilt(b, a, df.values, axis=0)
         return pd.DataFrame(filtered_values, index=df.index, columns=df.columns)
 
-    def write(self, output: str | os.PathLike):
+    def _write(self, output: str | os.PathLike):
         """Write this dataset as the latest OpenArm dataset format."""
         output = Path(output)
         self.meta.write(output)
         self._write_data(output)
+
+    def write(self, output: str | os.PathLike, format: str| None = None, **options):
+
+        if format is None or format == "openarm":
+            return self._write(output)
+        elif format == "lerobotv21":
+            from ._lerobotv21 import to_lerobotv21
+
+            return to_lerobotv21(self, output, **options)
+        else:
+            raise ValueError(f"Unsupported format: {format}")
 
     def _write_data(self, output: Path):
         for i, episode in enumerate(self.meta.episodes):
