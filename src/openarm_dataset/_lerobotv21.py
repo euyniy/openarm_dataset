@@ -88,7 +88,7 @@ def get_imagename_from_key(key: str):
 
 def _get_ffmpeg_exe() -> str | None:
     """Get the path to a valid ffmpeg executable."""
-    # 2. system PATH
+    # check if ffmpeg is available in the current environment
     exe = shutil.which("ffmpeg")
     print(exe)
     if exe and _is_valid_exe(exe):
