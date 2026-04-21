@@ -18,6 +18,9 @@ import numpy as np
 import subprocess
 import tempfile
 import json
+import shutil
+import sys
+import os
 
 from .dataset import Dataset
 
@@ -29,7 +32,8 @@ FFMPEG_CODEC = "libx264"
 VIDEO_PIX_FMT = "yuv420p"
 VIDEO_CODEC = "h264"
 
-def _joint_names_from_attr(attr) -> list[str]:
+
+def _joint_names_from_attr(attr):
     component = attr["component"]
     joints = attr["embodiment"].joints
     if component is None:
@@ -37,7 +41,7 @@ def _joint_names_from_attr(attr) -> list[str]:
     return [f"{component}_{joint}.pos" for joint in joints]
 
 
-def _collect_keys_and_joint_names(dataset:Dataset, mode: str) -> tuple[list[str], list[str]]:
+def _collect_keys_and_joint_names(dataset: Dataset, mode: str):
     keys = []
     joint_names = []
 
@@ -45,6 +49,7 @@ def _collect_keys_and_joint_names(dataset:Dataset, mode: str) -> tuple[list[str]
         keys.append(attr["key"])
         joint_names.extend(_joint_names_from_attr(attr))
     return keys, joint_names
+
 
 def collect_downsampled_data(dataset: Dataset, fps: int, obs_keys, act_keys):
     record = []
@@ -62,9 +67,16 @@ def collect_downsampled_data(dataset: Dataset, fps: int, obs_keys, act_keys):
         sampled_cameras = {
             k: [Path(s.cameras[k].path) for s in samples] for k in dataset.camera_names
         }
-        episode_record = (i, n, sampled_obs, sampled_actions, sampled_cameras,) # (episode_index, num_frames, sampled_obs, sampled_actions, sampled_cameras)
+        episode_record = (
+            i,
+            n,
+            sampled_obs,
+            sampled_actions,
+            sampled_cameras,
+        )  # (episode_index, num_frames, sampled_obs, sampled_actions, sampled_cameras)
         record.append(episode_record)
     return record
+
 
 def get_chunk_name(episode_id: int):
     return f"chunk-{episode_id // CHUNK_SIZE:03d}"
@@ -74,9 +86,61 @@ def get_imagename_from_key(key: str):
     return f"observation.images.{key}"
 
 
+def _get_ffmpeg_exe() -> str | None:
+    """Get the path to a valid ffmpeg executable."""
+    # 2. system PATH
+    exe = shutil.which("ffmpeg")
+    print(exe)
+    if exe and _is_valid_exe(exe):
+        return exe
+
+    return None
+
+
+def _is_valid_exe(exe: str) -> bool:
+    """Check if the given executable is a valid ffmpeg."""
+    startupinfo = None
+    creationflags = 0
+
+    if sys.platform.startswith("win"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    try:
+        with open(os.devnull, "w") as null:
+            subprocess.check_call(
+                [exe, "-version"],
+                stdout=null,
+                stderr=subprocess.STDOUT,
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+        return True
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return False
+
+
+def has_valid_ffmpeg() -> bool:
+    """Check if a valid ffmpeg executable is available in the system."""
+    exe = _get_ffmpeg_exe()
+    if exe is None:
+        raise RuntimeError(
+            "No valid ffmpeg executable found. Please install ffmpeg in your conda environment or ensure it is available in your system PATH."
+        )
+    return True
+
+
 def encode_mp4(frames: list[Path], fps: int, out_mp4: Path, verbose=True):
     if not frames:
-            return
+        return
+    try:
+        ffmpeg_exe = _get_ffmpeg_exe()
+        if ffmpeg_exe is None:
+            raise RuntimeError("FFmpeg executable not found.")
+    except RuntimeError as e:
+        raise RuntimeError(
+            "FFmpeg is required for video encoding but was not found. Please install FFmpeg in your conda environment or ensure it is available in your system PATH."
+        ) from e
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=True) as f_list:
         for f_path in frames:
             f_list.write(f"file '{f_path.resolve()}'\n")
@@ -106,6 +170,7 @@ def encode_mp4(frames: list[Path], fps: int, out_mp4: Path, verbose=True):
         ]
         subprocess.run(cmd, check=True, capture_output=not verbose)
 
+
 def _describe_vector(X):
     D = X.shape[1] if X.ndim == 2 else 0
     keys = ("min", "max", "mean", "std", "q01", "q10", "q50", "q90", "q99")
@@ -126,6 +191,7 @@ def _describe_vector(X):
         result[name] = values.astype(float).tolist()
 
     return result
+
 
 def _describe_scalar(x):
     if x.size == 0:
@@ -151,14 +217,17 @@ def _describe_scalar(x):
         "std": [float(np.nanstd(x))],
         "count": [int(x.size)],
     }
-    result.update({
-        name: [float(value)]
-        for name, value in zip(
-            ("q01", "q10", "q50", "q90", "q99"),
-            np.nanpercentile(x, [1, 10, 50, 90, 99]),
-        )
-    })
+    result.update(
+        {
+            name: [float(value)]
+            for name, value in zip(
+                ("q01", "q10", "q50", "q90", "q99"),
+                np.nanpercentile(x, [1, 10, 50, 90, 99]),
+            )
+        }
+    )
     return result
+
 
 def calc_episode_stats(
     sampled_obs, sampled_actions, out_idx: int, gidx: int, task_index, fps: int, cameras
@@ -209,21 +278,29 @@ def write_parquet(dataset, record, output_dir, fps):
                 "last_frame_index": np.full(n, n - 1, dtype=np.int64),
             }
         )
-        parquet_path = output_dir / "data" / get_chunk_name(i) / f"episode_{i:06d}.parquet"
+        parquet_path = (
+            output_dir / "data" / get_chunk_name(i) / f"episode_{i:06d}.parquet"
+        )
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(parquet_path, index=False)
         gidx += n
 
 
 def encode_videos(dataset, record, output_dir, fps):
-    for i, _,  _, _, sampled_cameras in record:
+    for i, _, _, _, sampled_cameras in record:
         for camera_key in dataset.camera_names:
-            video_path = output_dir / "videos" / get_chunk_name(i) / get_imagename_from_key(camera_key)/ f"episode_{i:06d}.mp4"
+            video_path = (
+                output_dir
+                / "videos"
+                / get_chunk_name(i)
+                / get_imagename_from_key(camera_key)
+                / f"episode_{i:06d}.mp4"
+            )
             video_path.parent.mkdir(parents=True, exist_ok=True)
             encode_mp4(sampled_cameras[camera_key], fps, video_path)
 
 
-def write_metadata(dataset, record, output_dir, fps, train_split,JOINT_NAMES):
+def write_metadata(dataset, record, output_dir, fps, train_split, JOINT_NAMES):
     METADATA_DIR = "meta"
     episodes_metadata = []
     episodes_stats = []
@@ -440,23 +517,22 @@ def to_lerobotv21(
     output_dir = Path(output_dir)
 
     obs_keys, obs_joint_names = _collect_keys_and_joint_names(dataset, "obs")
-    act_keys, act_joint_names = _collect_keys_and_joint_names(dataset, "act")
+    action_keys, action_joint_names = _collect_keys_and_joint_names(dataset, "action")
 
-    if obs_joint_names != act_joint_names:
+    if obs_joint_names != action_joint_names:
         raise ValueError(
             "Observation joint names and action joint names do not match: "
-            f"{obs_joint_names} vs {act_joint_names}"
+            f"{obs_joint_names} vs {action_joint_names}"
         )
 
     JOINT_NAMES = obs_joint_names
 
     # collect downsampled data for each episode
-    record = collect_downsampled_data(dataset, fps, obs_keys, act_keys)
-   
+    record = collect_downsampled_data(dataset, fps, obs_keys, action_keys)
+
     # save parquet files for each episode (output_dir/data)
     write_parquet(dataset, record, output_dir, fps)
     # save_videos for each episode (output_dir/videos)
     encode_videos(dataset, record, output_dir, fps)
     # episodes metadata and stats
     write_metadata(dataset, record, output_dir, fps, train_split, JOINT_NAMES)
-
