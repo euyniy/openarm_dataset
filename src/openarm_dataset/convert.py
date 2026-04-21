@@ -34,9 +34,9 @@ def main():
     )
     parser.add_argument(
         "--format",
-        help="Format of the output dataset (default :openarm)",
+        help="Format of the output dataset (default: openarm)",
         default="openarm",
-        choices=["openarm", "lerobotv21"],
+        choices=["openarm", "lerobot_v2.1"],
     )
     parser.add_argument(
         "--smoothing-cutoff",

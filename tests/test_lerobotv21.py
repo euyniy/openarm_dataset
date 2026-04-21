@@ -26,12 +26,12 @@ DATASET_0_2_0_PATH = FIXTURE_DIR / "dataset_0.2.0"
 @pytest.fixture
 def leobotv21_setup(tmp_path):
     dataset = Dataset(DATASET_0_2_0_PATH)
-    lerobot_path = Path(tmp_path) / "lerobotv21"
-    dataset.write(lerobot_path, "lerobotv21", fps=30)
+    lerobot_path = Path(tmp_path) 
+    dataset.write(lerobot_path, "lerobot_v2.1", fps=30)
     return dataset, lerobot_path
 
 
-def test_lerobotv21_metadata(leobotv21_setup):
+def test_metadata(leobotv21_setup):
     dataset, lerobot_path = leobotv21_setup
     metadata_path = lerobot_path / "meta"
 
@@ -74,7 +74,7 @@ def test_lerobotv21_metadata(leobotv21_setup):
     )
 
 
-def test_lerobotv21_data(leobotv21_setup):
+def test_data(leobotv21_setup):
     dataset, lerobot_path = leobotv21_setup
     data_path = lerobot_path / "data" / "chunk-000" / "episode_000000.parquet"
     assert data_path.exists(), "Data file does not exist."
@@ -110,7 +110,7 @@ def test_lerobotv21_data(leobotv21_setup):
     ), "Observation values in data file do not match the original dataset."
 
 
-def test_lerobotv21_video(leobotv21_setup):
+def test_video(leobotv21_setup):
     dataset, lerobot_path = leobotv21_setup
     camera_names = dataset.camera_names
     for camera_name in camera_names:
