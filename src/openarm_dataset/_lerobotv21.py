@@ -164,8 +164,8 @@ def calc_episode_stats(
     sampled_obs, sampled_actions, out_idx: int, gidx: int, task_index, fps: int, cameras
 ) -> dict:
     length = len(sampled_obs)
-    A = np.vstack(sampled_actions).astype(np.float32)
-    O = np.vstack(sampled_obs).astype(np.float32)
+    Act = np.vstack(sampled_actions).astype(np.float32)
+    Obs = np.vstack(sampled_obs).astype(np.float32)
     timestamps = np.arange(length, dtype=np.float64) / float(fps)
     stats = {
         "episode_index": out_idx,
@@ -173,8 +173,8 @@ def calc_episode_stats(
         "dataset_to_index": gidx + length,
         "stats": {},
     }
-    stats["stats"]["action"] = _describe_vector(A)
-    stats["stats"]["observation.state"] = _describe_vector(O)
+    stats["stats"]["action"] = _describe_vector(Act)
+    stats["stats"]["observation.state"] = _describe_vector(Obs)
     stats["stats"]["timestamp"] = _describe_scalar(timestamps)
     stats["stats"]["frame_index"] = _describe_scalar(np.arange(length, dtype=np.int64))
     stats["stats"]["episode_index"] = _describe_scalar(

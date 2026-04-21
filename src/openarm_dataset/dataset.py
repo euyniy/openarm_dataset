@@ -333,8 +333,8 @@ class Dataset:
         self.meta.write(output)
         self._write_data(output)
 
-    def write(self, output: str | os.PathLike, format: str| None = None, **options):
-
+    def write(self, output: str | os.PathLike, format: str | None = None, **options):
+        """Write this dataset in the specified format."""
         if format is None or format == "openarm":
             return self._write(output)
         elif format == "lerobotv21":
