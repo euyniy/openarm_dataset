@@ -90,7 +90,6 @@ def _get_ffmpeg_exe() -> str | None:
     """Get the path to a valid ffmpeg executable."""
     # check if ffmpeg is available in the current environment
     exe = shutil.which("ffmpeg")
-    print(exe)
     if exe and _is_valid_exe(exe):
         return exe
 
@@ -354,7 +353,7 @@ def write_metadata(dataset, record, output_dir, fps, train_split, JOINT_NAMES):
         )
         episodes_stats.append(stats)
         gidx += len(sampled_obs)
-    # save episdoes episodes.jsonl
+    # save episodes.jsonl
     episodes_metadata_path = output_dir / METADATA_DIR / "episodes.jsonl"
     episodes_metadata_path.parent.mkdir(parents=True, exist_ok=True)
     with episodes_metadata_path.open("w", encoding="utf-8") as f:

@@ -24,7 +24,7 @@ DATASET_0_2_0_PATH = FIXTURE_DIR / "dataset_0.2.0"
 
 
 @pytest.fixture
-def leobotv21_setup(tmp_path):
+def lerobotv21_setup(tmp_path):
     dataset = Dataset(DATASET_0_2_0_PATH)
     lerobot_path = Path(tmp_path) 
     dataset.write(lerobot_path, "lerobot_v2.1", fps=30)
