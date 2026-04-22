@@ -31,8 +31,8 @@ def lerobotv21_setup(tmp_path):
     return dataset, lerobot_path
 
 
-def test_metadata(leobotv21_setup):
-    dataset, lerobot_path = leobotv21_setup
+def test_metadata(lerobotv21_setup):
+    dataset, lerobot_path = lerobotv21_setup
     metadata_path = lerobot_path / "meta"
 
     ## check info.json
@@ -74,8 +74,8 @@ def test_metadata(leobotv21_setup):
     )
 
 
-def test_data(leobotv21_setup):
-    dataset, lerobot_path = leobotv21_setup
+def test_data(lerobotv21_setup):
+    dataset, lerobot_path = lerobotv21_setup
     data_path = lerobot_path / "data" / "chunk-000" / "episode_000000.parquet"
     assert data_path.exists(), "Data file does not exist."
 
@@ -110,8 +110,8 @@ def test_data(leobotv21_setup):
     ), "Observation values in data file do not match the original dataset."
 
 
-def test_video(leobotv21_setup):
-    dataset, lerobot_path = leobotv21_setup
+def test_video(lerobotv21_setup):
+    dataset, lerobot_path = lerobotv21_setup
     camera_names = dataset.camera_names
     for camera_name in camera_names:
         video_path = (
