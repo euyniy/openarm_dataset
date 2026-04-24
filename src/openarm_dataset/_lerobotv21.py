@@ -92,7 +92,6 @@ def _get_ffmpeg_exe() -> str | None:
     exe = shutil.which("ffmpeg")
     if exe and _is_valid_exe(exe):
         return exe
-
     return None
 
 
@@ -123,9 +122,11 @@ def has_valid_ffmpeg() -> bool:
     """Check if a valid ffmpeg executable is available in the system."""
     exe = _get_ffmpeg_exe()
     if exe is None:
-        raise RuntimeError(
-            "No valid ffmpeg executable found. Please install ffmpeg in your conda environment or ensure it is available in your system PATH."
+        print(
+            "FFmpeg executable not found. Please install ffmpeg in order to encode videos.",
+            file=sys.stderr,
         )
+        return False
     return True
 
 
@@ -285,7 +286,7 @@ def write_parquet(dataset, record, output_dir, fps):
         gidx += n
 
 
-def encode_videos(dataset, record, output_dir, fps):
+def write_videos(dataset, record, output_dir, fps):
     for i, _, _, _, sampled_cameras in record:
         for camera_key in dataset.camera_names:
             video_path = (
@@ -532,6 +533,6 @@ def to_lerobotv21(
     # save parquet files for each episode (output_dir/data)
     write_parquet(dataset, record, output_dir, fps)
     # save_videos for each episode (output_dir/videos)
-    encode_videos(dataset, record, output_dir, fps)
+    write_videos(dataset, record, output_dir, fps)
     # episodes metadata and stats
     write_metadata(dataset, record, output_dir, fps, train_split, JOINT_NAMES)

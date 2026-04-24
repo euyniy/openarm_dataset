@@ -18,23 +18,46 @@ import numpy as np
 import pandas as pd
 import pytest
 from openarm_dataset import Dataset
+from openarm_dataset._lerobotv21 import (
+    _collect_keys_and_joint_names,
+    has_valid_ffmpeg,
+    collect_downsampled_data,
+    write_metadata,
+    write_parquet,
+    write_videos
+)
 
 FIXTURE_DIR = Path(__file__).parent / "fixture"
 DATASET_0_2_0_PATH = FIXTURE_DIR / "dataset_0.2.0"
+FPS = 30
+TRAIN_SPLIT = 0.8
 
 
 @pytest.fixture
 def lerobotv21_setup(tmp_path):
     dataset = Dataset(DATASET_0_2_0_PATH)
-    lerobot_path = Path(tmp_path) 
-    dataset.write(lerobot_path, "lerobot_v2.1", fps=30)
-    return dataset, lerobot_path
+    dataset.set_smoothing(1.0)
+    obs_keys, obs_joint_names = _collect_keys_and_joint_names(dataset, "obs")
+    action_keys, action_joint_names = _collect_keys_and_joint_names(dataset, "action")
+    assert obs_keys == [
+        "arms/right/qpos",
+        "arms/left/qpos",
+    ], "Observation keys do not match expected keys."
+    assert action_keys == [
+        "arms/right/qpos",
+        "arms/left/qpos",
+    ], "Action keys do not match expected keys."
+
+    JOINT_NAMES = obs_joint_names  # ["arms/right/qpos", "arms/left/qpos"]
+    record = collect_downsampled_data(dataset, FPS, obs_keys, action_keys)
+    lerobot_path = Path(tmp_path)
+    return dataset, lerobot_path, record, JOINT_NAMES
 
 
 def test_metadata(lerobotv21_setup):
-    dataset, lerobot_path = lerobotv21_setup
+    dataset, lerobot_path, record, JOINT_NAMES = lerobotv21_setup
+    write_metadata(dataset, record, lerobot_path, FPS, TRAIN_SPLIT, JOINT_NAMES)
     metadata_path = lerobot_path / "meta"
-
     ## check info.json
     info_json_path = metadata_path / "info.json"
     assert info_json_path.exists(), "info.json file does not exist."
@@ -75,7 +98,9 @@ def test_metadata(lerobotv21_setup):
 
 
 def test_data(lerobotv21_setup):
-    dataset, lerobot_path = lerobotv21_setup
+    dataset, lerobot_path, record, _ = lerobotv21_setup
+    write_parquet(dataset, record, lerobot_path, FPS)
+
     data_path = lerobot_path / "data" / "chunk-000" / "episode_000000.parquet"
     assert data_path.exists(), "Data file does not exist."
 
@@ -110,8 +135,13 @@ def test_data(lerobotv21_setup):
     ), "Observation values in data file do not match the original dataset."
 
 
+@pytest.mark.skipif(
+    not has_valid_ffmpeg(), reason="ffmpeg is not available in the testing environment."
+)
 def test_video(lerobotv21_setup):
-    dataset, lerobot_path = lerobotv21_setup
+    dataset, lerobot_path, record, _ = lerobotv21_setup
+    write_videos(dataset, record, lerobot_path, FPS)
+
     camera_names = dataset.camera_names
     for camera_name in camera_names:
         video_path = (
