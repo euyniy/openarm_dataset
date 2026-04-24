@@ -50,15 +50,22 @@ def main():
         type=float,
         default=0.8,
     )
+    parser.add_argument(
+        "--success-only",
+        help="Only include successful episodes",
+        action="store_true",
+    )
+
     args = parser.parse_args()
     old_dataset = openarm_dataset.Dataset(args.input)
+    if args.success_only:
+        old_dataset = old_dataset.filter(lambda e: e["success"])
     old_dataset.write(
         args.output,
         format=args.format,
         smoothing_cutoff=args.smoothing_cutoff,
         train_split=args.train_split,
     )
-
 
 if __name__ == "__main__":
     main()

@@ -14,6 +14,7 @@
 
 """OpenArm Dataset."""
 
+import copy
 import os
 from pathlib import Path
 import shutil
@@ -49,6 +50,12 @@ class Dataset:
         self.meta = Metadata(self.root_path / "metadata.yaml") if meta is None else meta
         self._camera_names = camera_names
         self._smoothing_cutoff = None
+
+    def filter(self, predicate) -> "Dataset":
+        """Return a new Dataset containing only episodes where predicate(episode) is True."""
+        new_meta = copy.copy(self.meta)
+        new_meta.data = {**self.meta.data, "episodes": [e for e in self.meta.episodes if predicate(e)]}
+        return Dataset(self.root_path, meta=new_meta, camera_names=self._camera_names)
 
     def set_smoothing(self, cutoff: float):
         """Set smoothing."""
