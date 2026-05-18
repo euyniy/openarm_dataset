@@ -167,13 +167,12 @@ def test_data(lerobot_v21_setup):
     df = pd.read_parquet(data_path)
 
     sample_episode = dataset.sample(30, episode_index=0)
-    sample_episode_0_action = sample_episode[
-        0
-    ].action  # {"arms/right/qpos": array([0.1, 0.2, 0.3]), "arms/left/qpos": array([0.4, 0.5, 0.6])}
+    sample_episode_0_action = sample_episode[0].action
     sample_0_action = np.concatenate(
         [
             sample_episode_0_action["arms/right/qpos"],
             sample_episode_0_action["arms/left/qpos"],
+            sample_episode_0_action["lifter/elevation"],
         ]
     )
     lerobot_action = df["action"].iloc[0]
@@ -185,7 +184,11 @@ def test_data(lerobot_v21_setup):
 
     sample_observation = sample_episode[0].obs
     sample_0_observation = np.concatenate(
-        [sample_observation["arms/right/qpos"], sample_observation["arms/left/qpos"]]
+        [
+            sample_observation["arms/right/qpos"],
+            sample_observation["arms/left/qpos"],
+            sample_observation["lifter/elevation"],
+        ]
     )
     lerobot_observation = df["observation.state"].iloc[0]
 
@@ -226,6 +229,17 @@ def test_load(lerobot_v21_setup):
     )
 
 
+def test_lifter_info_features(lerobot_v21_setup):
+    _, lerobot_path = lerobot_v21_setup
+    with open(lerobot_path / "meta" / "info.json") as f:
+        info = json.load(f)
+    # 8 (right arm) + 8 (left arm) + 1 (lifter position) = 17
+    assert info["features"]["action"]["shape"] == [17]
+    assert info["features"]["observation.state"]["shape"] == [17]
+    assert info["features"]["action"]["names"][-1] == "elevation.pos"
+    assert info["features"]["observation.state"]["names"][-1] == "elevation.pos"
+
+
 def test_success_only(tmp_path):
     dataset = Dataset(DATASET_0_3_0_PATH)
     dataset.set_smoothing(1.0)
@@ -257,6 +271,7 @@ def test_success_only(tmp_path):
         [
             sample_episode_0_action["arms/right/qpos"],
             sample_episode_0_action["arms/left/qpos"],
+            sample_episode_0_action["lifter/elevation"],
         ]
     )
     lerobot_action = df["action"].iloc[0]
