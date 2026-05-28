@@ -85,6 +85,69 @@ def _collect_keys_and_joint_names(dataset: Dataset):
     return keys, joint_names
 
 
+def _build_fk_info(dataset: Dataset):
+    """Return (fk_slices, ee_names) for OpenArm components, or None if none found.
+
+    fk_slices: dict mapping arm side ("right"/"left") to (start, end) slice of the
+    7 arm joints (excluding gripper) in the flat obs/action vector.  The slice offsets
+    mirror the iteration order of _collect_keys_and_joint_names exactly.
+    """
+    from .metadata import OpenArm
+
+    offset = 0
+    fk_slices: dict[str, tuple[int, int]] = {}
+    for _, embodiment in dataset.meta.equipment.embodiments.items():
+        if embodiment.components:
+            for component in embodiment.components:
+                for _ in embodiment.attributes:
+                    if isinstance(embodiment, OpenArm):
+                        fk_slices[component] = (offset, offset + 8)
+                    offset += len(embodiment.joints)
+        else:
+            for _ in embodiment.attributes:
+                offset += len(embodiment.joints)
+
+    if not fk_slices:
+        return None
+
+    ee_names = [
+        f"pose_{side}.{dim}"
+        for side in fk_slices
+        for dim in ("px", "py", "pz", "qw", "qx", "qy", "qz")
+    ]
+    return fk_slices, ee_names
+
+
+def _build_default_kinematics():
+    """Build a FK-only Kinematics with the default bimanual OpenArm setup."""
+    import openarm_mujoco.v2 as openarm_mujoco
+    from openarm_control.config import ArmSetup
+    from openarm_control.kinematics import Kinematics
+
+    setup = ArmSetup.from_args(
+        xml=openarm_mujoco.openarm_cell_xml(),
+        mode="bimanual",
+        frame_right="right_ee_control_point",
+        frame_type_right="site",
+        frame_left="left_ee_control_point",
+        frame_type_left="site",
+    )
+    return Kinematics(setup)
+
+
+def _append_fk_poses(
+    samples: list[np.ndarray],
+    kinematics,
+    fk_slices: dict[str, tuple[int, int]],
+) -> list[np.ndarray]:
+    """Append FK-computed EE poses to each flat joint vector in samples."""
+    result = []
+    for joints_flat in samples:
+        poses = [kinematics.fk(side, joints_flat[s:e]) for side, (s, e) in fk_slices.items()]
+        result.append(np.concatenate([joints_flat, *poses]))
+    return result
+
+
 def _sample_one_episode(dataset: Dataset, episode_index: int, fps: int, joint_keys):
     samples = dataset.sample(hz=fps, episode_index=episode_index)
     num_frames = len(samples)
@@ -103,7 +166,13 @@ def _sample_one_episode(dataset: Dataset, episode_index: int, fps: int, joint_ke
 
 
 def _collect_downsampled_data(
-    dataset: Dataset, fps: int, joint_keys, success_only=False, num_workers: int = 1
+    dataset: Dataset,
+    fps: int,
+    joint_keys,
+    success_only=False,
+    num_workers: int = 1,
+    kinematics=None,
+    fk_slices=None,
 ):
     episode_indices = [
         i
@@ -124,7 +193,15 @@ def _collect_downsampled_data(
             pbar.update(1)
         pbar.close()
 
-    return [results[i] for i in episode_indices]
+    records = [results[i] for i in episode_indices]
+
+    if kinematics is not None and fk_slices is not None:
+        records = [
+            (ep_idx, n, _append_fk_poses(obs, kinematics, fk_slices), _append_fk_poses(act, kinematics, fk_slices), cams)
+            for ep_idx, n, obs, act, cams in records
+        ]
+
+    return records
 
 
 def _build_remaps(dataset: Dataset, records):
@@ -732,6 +809,7 @@ def to_lerobotv21(
     smoothing_cutoff: float = 1.0,
     success_only: bool = False,
     num_workers: int = None,
+    cartesian: bool = False,
 ) -> None:
     """Convert the given dataset to LeRobot v2.1 format and save to the specified output directory."""
     if not (0.0 <= train_split <= 1.0):
@@ -751,8 +829,20 @@ def to_lerobotv21(
     # Collect joint keys and names
     joint_keys, joint_names = _collect_keys_and_joint_names(dataset)
 
+    kinematics = None
+    fk_slices = None
+    if cartesian:
+        fk_info = _build_fk_info(dataset)
+        if fk_info is not None:
+            fk_slices, ee_names = fk_info
+            kinematics = _build_default_kinematics()
+            joint_names = joint_names + ee_names
+
     # collect downsampled data for each episode
-    records = _collect_downsampled_data(dataset, fps, joint_keys, success_only, num_workers=num_workers)
+    records = _collect_downsampled_data(
+        dataset, fps, joint_keys, success_only, num_workers=num_workers,
+        kinematics=kinematics, fk_slices=fk_slices,
+    )
 
     if not records:
         raise ValueError("No episodes to write.")
