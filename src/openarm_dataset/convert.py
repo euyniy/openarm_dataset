@@ -62,6 +62,12 @@ def main():
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+        "--cartesian",
+        help="Append FK-computed end-effector poses (pose_right, pose_left) to observation.state and action (default: False) if the output format is lerobot_v2.1",
+        action="store_true",
+        default=False,
+    )
 
     args = parser.parse_args()
     write_kwargs = {"format": args.format}
@@ -70,6 +76,7 @@ def main():
         write_kwargs["smoothing_cutoff"] = args.smoothing_cutoff
         write_kwargs["train_split"] = args.train_split
         write_kwargs["success_only"] = args.success_only
+        write_kwargs["cartesian"] = args.cartesian
 
     old_dataset = openarm_dataset.Dataset(args.input)
     old_dataset.write(args.output, **write_kwargs)
