@@ -15,12 +15,17 @@
 """Conversion script for OpenArm Dataset to LeRobot v2.1 format."""
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 import pandas as pd
 import numpy as np
 import subprocess
 import tempfile
 import json
 import shutil
+import warnings
+
+from tqdm import tqdm
 
 from .dataset import Dataset
 from PIL import Image
@@ -80,36 +85,46 @@ def _collect_keys_and_joint_names(dataset: Dataset):
     return keys, joint_names
 
 
+def _sample_one_episode(dataset: Dataset, episode_index: int, fps: int, joint_keys):
+    samples = dataset.sample(hz=fps, episode_index=episode_index)
+    num_frames = len(samples)
+    sampled_obs = [
+        np.concatenate([s.obs[k] for k in joint_keys], axis=0).astype(np.float32)
+        for s in samples
+    ]
+    sampled_actions = [
+        np.concatenate([s.action[k] for k in joint_keys], axis=0).astype(np.float32)
+        for s in samples
+    ]
+    sampled_cameras = {
+        k: [Path(s.cameras[k].path) for s in samples] for k in dataset.camera_names
+    }
+    return episode_index, num_frames, sampled_obs, sampled_actions, sampled_cameras
+
+
 def _collect_downsampled_data(
-    dataset: Dataset, fps: int, joint_keys, success_only=False
+    dataset: Dataset, fps: int, joint_keys, success_only=False, num_workers: int = 1
 ):
-    records = []
-    for episode_index in range(dataset.meta.num_episodes):
-        success = dataset.meta.episodes[episode_index]["success"]
-        if not success and success_only:
-            continue
-        samples = dataset.sample(hz=fps, episode_index=episode_index)
-        num_frames = len(samples)
-        sampled_obs = [
-            np.concatenate([s.obs[k] for k in joint_keys], axis=0).astype(np.float32)
-            for s in samples
-        ]
-        sampled_actions = [
-            np.concatenate([s.action[k] for k in joint_keys], axis=0).astype(np.float32)
-            for s in samples
-        ]
-        sampled_cameras = {
-            k: [Path(s.cameras[k].path) for s in samples] for k in dataset.camera_names
+    episode_indices = [
+        i
+        for i in range(dataset.meta.num_episodes)
+        if not success_only or dataset.meta.episodes[i]["success"]
+    ]
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_sample_one_episode, dataset, i, fps, joint_keys): i
+            for i in episode_indices
         }
-        record = (
-            episode_index,
-            num_frames,
-            sampled_obs,
-            sampled_actions,
-            sampled_cameras,
-        )
-        records.append(record)
-    return records
+        pbar = tqdm(total=len(futures), desc="Sampling episodes", unit="ep")
+        for future in as_completed(futures):
+            record = future.result()
+            results[record[0]] = record
+            pbar.update(1)
+        pbar.close()
+
+    return [results[i] for i in episode_indices]
 
 
 def _build_remaps(dataset: Dataset, records):
@@ -220,18 +235,32 @@ def _encode_mp4(frames: list[Path], fps: int, out_mp4: Path, verbose=True):
         subprocess.run(cmd, check=True, capture_output=not verbose)
 
 
-def _describe_vector(X):
+def _describe_vector(X, label="vector"):
     D = X.shape[1] if X.ndim == 2 else 0
     keys = ("min", "max", "mean", "std", "q01", "q10", "q50", "q90", "q99")
 
     if X.size == 0 or D == 0:
         return {k: [None] * D for k in keys} | {"count": [0]}
 
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        std_vals = np.nanstd(X, axis=0)
+        if caught:
+            absmax = float(np.nanmax(np.abs(X)))
+            any_inf = bool(np.any(np.isinf(X)))
+            any_nan = bool(np.any(np.isnan(X)))
+            print(
+                f"[DIAG overflow] _describe_vector '{label}': "
+                f"dtype={X.dtype} shape={X.shape} "
+                f"absmax={absmax:.4e} any_inf={any_inf} any_nan={any_nan} "
+                f"global_min={float(np.nanmin(X)):.4e} global_max={float(np.nanmax(X)):.4e}"
+            )
+
     result = {
         "min": np.nanmin(X, axis=0).astype(float).tolist(),
         "max": np.nanmax(X, axis=0).astype(float).tolist(),
         "mean": np.nanmean(X, axis=0).astype(float).tolist(),
-        "std": np.nanstd(X, axis=0).astype(float).tolist(),
+        "std": std_vals.astype(float).tolist(),
         "count": [int(X.shape[0])],
     }
 
@@ -242,7 +271,7 @@ def _describe_vector(X):
     return result
 
 
-def _describe_scalar(x):
+def _describe_scalar(x, label="scalar"):
     if x.size == 0:
         return {
             k: [None]
@@ -259,11 +288,22 @@ def _describe_scalar(x):
             )
         } | {"count": [0]}
 
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        std_val = np.nanstd(x)
+        if caught:
+            print(
+                f"[DIAG overflow] _describe_scalar '{label}': "
+                f"dtype={x.dtype} shape={x.shape} "
+                f"min={float(np.nanmin(x)):.4e} max={float(np.nanmax(x)):.4e} "
+                f"any_inf={bool(np.any(np.isinf(x.astype(np.float64))))} any_nan={bool(np.any(np.isnan(x.astype(np.float64))))}"
+            )
+
     result = {
         "min": [float(np.nanmin(x))],
         "max": [float(np.nanmax(x))],
         "mean": [float(np.nanmean(x))],
-        "std": [float(np.nanstd(x))],
+        "std": [float(std_val)],
         "count": [int(x.size)],
     }
     result.update(
@@ -349,63 +389,85 @@ def _calc_episode_stats(
         "dataset_to_index": gidx + length,
         "stats": {},
     }
-    stats["stats"]["action"] = _describe_vector(actions)
-    stats["stats"]["observation.state"] = _describe_vector(observations)
-    stats["stats"]["timestamp"] = _describe_scalar(timestamps)
-    stats["stats"]["frame_index"] = _describe_scalar(np.arange(length, dtype=np.int64))
+    ep = f"ep={episode_index}"
+    stats["stats"]["action"] = _describe_vector(actions, label=f"action/{ep}")
+    stats["stats"]["observation.state"] = _describe_vector(observations, label=f"obs/{ep}")
+    stats["stats"]["timestamp"] = _describe_scalar(timestamps, label=f"timestamp/{ep}")
+    stats["stats"]["frame_index"] = _describe_scalar(np.arange(length, dtype=np.int64), label=f"frame_index/{ep}")
     stats["stats"]["episode_index"] = _describe_scalar(
-        np.full(length, episode_index, dtype=np.int64)
+        np.full(length, episode_index, dtype=np.int64), label=f"episode_index/{ep}"
     )
     stats["stats"]["index"] = _describe_scalar(
-        np.arange(gidx, gidx + length, dtype=np.int64)
+        np.arange(gidx, gidx + length, dtype=np.int64), label=f"index/{ep}"
     )
     stats["stats"]["task_index"] = _describe_scalar(
-        np.full(length, task_index, dtype=np.int64)
+        np.full(length, task_index, dtype=np.int64), label=f"task_index/{ep}"
     )
     for cam_key, cam_paths in cameras.items():
         stats["stats"][_get_image_name_from_key(cam_key)] = _describe_images(cam_paths)
     return stats
 
 
-def _write_parquet(
-    dataset, records, output_dir, fps, remap_episode_index, remap_task_index
+def _write_one_parquet(
+    lerobot_episode_index, num_frames, sampled_obs, sampled_actions,
+    task_index, success, gidx, fps, output_dir
 ):
+    t_cam = np.arange(num_frames, dtype=np.float64) / float(fps)
+    df = pd.DataFrame(
+        {
+            "action": sampled_actions,
+            "observation.state": sampled_obs,
+            "timestamp": t_cam.astype(np.float64),
+            "frame_index": np.arange(num_frames, dtype=np.int64),
+            "episode_index": np.full(num_frames, lerobot_episode_index, dtype=np.int64),
+            "index": np.arange(gidx, gidx + num_frames, dtype=np.int64),
+            "task_index": np.full(num_frames, task_index, dtype=np.int64),
+            "success": np.full(num_frames, success, dtype=np.int64),
+            "last_frame_index": np.full(num_frames, num_frames - 1, dtype=np.int64),
+        }
+    )
+    parquet_path = (
+        output_dir
+        / "data"
+        / _get_chunk_name(lerobot_episode_index)
+        / f"episode_{lerobot_episode_index:06d}.parquet"
+    )
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(parquet_path, index=False)
+
+
+def _write_parquet(
+    dataset, records, output_dir, fps, remap_episode_index, remap_task_index,
+    num_workers: int = 1,
+):
+    # precompute global frame offsets so writes can be independent
+    gidx_offsets = []
     gidx = 0
-    for episode_index, num_frames, sampled_obs, sampled_actions, _ in records:
-        lerobot_episode_index = remap_episode_index[episode_index]
-        task_index = remap_task_index[
-            int(dataset.meta.episodes[episode_index]["task_index"])
-        ]
-        success = bool(dataset.meta.episodes[episode_index]["success"])
-        t_cam = np.arange(num_frames, dtype=np.float64) / float(fps)
-        df = pd.DataFrame(
-            {
-                "action": sampled_actions,
-                "observation.state": sampled_obs,
-                "timestamp": t_cam.astype(np.float64),
-                "frame_index": np.arange(num_frames, dtype=np.int64),
-                "episode_index": np.full(
-                    num_frames, lerobot_episode_index, dtype=np.int64
-                ),
-                "index": np.arange(gidx, gidx + num_frames, dtype=np.int64),
-                "task_index": np.full(num_frames, task_index, dtype=np.int64),
-                "success": np.full(num_frames, success, dtype=np.int64),
-                "last_frame_index": np.full(num_frames, num_frames - 1, dtype=np.int64),
-            }
-        )
-        parquet_path = (
-            output_dir
-            / "data"
-            / _get_chunk_name(lerobot_episode_index)
-            / f"episode_{lerobot_episode_index:06d}.parquet"
-        )
-        parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(parquet_path, index=False)
+    for _, num_frames, *_ in records:
+        gidx_offsets.append(gidx)
         gidx += num_frames
 
+    def _submit(episode_index, num_frames, sampled_obs, sampled_actions, gidx):
+        lerobot_episode_index = remap_episode_index[episode_index]
+        task_index = remap_task_index[int(dataset.meta.episodes[episode_index]["task_index"])]
+        success = bool(dataset.meta.episodes[episode_index]["success"])
+        _write_one_parquet(
+            lerobot_episode_index, num_frames, sampled_obs, sampled_actions,
+            task_index, success, gidx, fps, output_dir,
+        )
 
-def _write_videos(dataset, records, output_dir, fps, remap_episode_index):
-    for episode_index, _, _, _, sampled_cameras in records:
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(_submit, episode_index, num_frames, sampled_obs, sampled_actions, gidx)
+            for (episode_index, num_frames, sampled_obs, sampled_actions, _), gidx
+            in zip(records, gidx_offsets)
+        ]
+        for _ in tqdm(as_completed(futures), total=len(futures), desc="Writing parquet", unit="ep"):
+            pass
+
+
+def _write_videos(dataset, records, output_dir, fps, remap_episode_index, num_workers: int = 1):
+    def _encode_one(episode_index, sampled_cameras):
         lerobot_episode_index = remap_episode_index[episode_index]
         for camera_key in dataset.camera_names:
             video_path = (
@@ -418,6 +480,14 @@ def _write_videos(dataset, records, output_dir, fps, remap_episode_index):
             video_path.parent.mkdir(parents=True, exist_ok=True)
             _encode_mp4(sampled_cameras[camera_key], fps, video_path)
 
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(_encode_one, episode_index, sampled_cameras)
+            for episode_index, _, _, _, sampled_cameras in records
+        ]
+        for _ in tqdm(as_completed(futures), total=len(futures), desc="Encoding videos", unit="ep"):
+            pass
+
 
 def _write_metadata(
     dataset,
@@ -428,6 +498,7 @@ def _write_metadata(
     joint_names,
     remap_episode_index,
     remap_task_index,
+    num_workers: int = 1,
 ):
     METADATA_DIR = "meta"
     episodes_metadata = []
@@ -443,59 +514,65 @@ def _write_metadata(
     success_all = []
     last_frame_index_all = []
 
+    # precompute per-episode gidx offsets so stats jobs are independent
+    gidx_offsets = []
     gidx = 0
-    for (
-        episode_index,
-        num_frames,
-        sampled_obs,
-        sampled_actions,
-        sampled_cameras,
-    ) in records:
+    for _, num_frames, *_ in records:
+        gidx_offsets.append(gidx)
+        gidx += num_frames
+
+    # dispatch _calc_episode_stats in parallel; results keyed by position in records
+    def _stats_job(pos, record, gidx):
+        episode_index, num_frames, sampled_obs, sampled_actions, sampled_cameras = record
         lerobot_episode_index = remap_episode_index[episode_index]
         lerobot_task_index = remap_task_index[
             int(dataset.meta.episodes[episode_index]["task_index"])
         ]
-        # save for overall stats
+        stats = _calc_episode_stats(
+            sampled_obs, sampled_actions, lerobot_episode_index,
+            gidx, lerobot_task_index, fps, sampled_cameras,
+        )
+        return pos, episode_index, num_frames, sampled_obs, sampled_actions, lerobot_episode_index, lerobot_task_index, stats
+
+    stats_by_pos = {}
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_stats_job, pos, record, gidx): pos
+            for pos, (record, gidx) in enumerate(zip(records, gidx_offsets))
+        }
+        pbar = tqdm(total=len(futures), desc="Computing stats", unit="ep")
+        for future in as_completed(futures):
+            result = future.result()
+            stats_by_pos[result[0]] = result
+            pbar.update(1)
+        pbar.close()
+
+    # assemble in original order
+    for pos in range(len(records)):
+        _, episode_index, num_frames, sampled_obs, sampled_actions, lerobot_episode_index, lerobot_task_index, stats = stats_by_pos[pos]
+        gidx = gidx_offsets[pos]
+
         all_actions.append(sampled_actions)
         all_observations.append(sampled_obs)
         timestamp_all.append(np.arange(num_frames, dtype=np.float64) / float(fps))
         frame_index_all.append(np.arange(num_frames, dtype=np.int64))
-        episode_index_all.append(
-            np.full(num_frames, lerobot_episode_index, dtype=np.int64)
-        )
+        episode_index_all.append(np.full(num_frames, lerobot_episode_index, dtype=np.int64))
         task_index_all.append(np.full(num_frames, lerobot_task_index, dtype=np.int64))
         index_all.append(np.arange(gidx, gidx + num_frames, dtype=np.int64))
         success_all.append(
-            np.full(
-                num_frames,
-                bool(dataset.meta.episodes[episode_index]["success"]),
-                dtype=np.int64,
-            )
+            np.full(num_frames, bool(dataset.meta.episodes[episode_index]["success"]), dtype=np.int64)
         )
         last_frame_index_all.append(np.full(num_frames, num_frames - 1, dtype=np.int64))
 
-        # episodes metadata and stats
         task_name = dataset.meta.data["tasks"][
             int(dataset.meta.episodes[episode_index]["task_index"])
         ]["prompt"]
-        rec = {
+        episodes_metadata.append({
             "episode_index": lerobot_episode_index,
             "tasks": [task_name],
             "length": len(sampled_obs),
-        }
-        episodes_metadata.append(rec)
-
-        stats = _calc_episode_stats(
-            sampled_obs,
-            sampled_actions,
-            lerobot_episode_index,
-            gidx,
-            lerobot_task_index,
-            fps,
-            sampled_cameras,
-        )
+        })
         episodes_stats.append(stats)
-        gidx += len(sampled_obs)
     # save episodes.jsonl
     episodes_metadata_path = output_dir / METADATA_DIR / "episodes.jsonl"
     episodes_metadata_path.parent.mkdir(parents=True, exist_ok=True)
@@ -567,15 +644,15 @@ def _write_metadata(
     )
 
     overall_stats = {
-        "action": _describe_vector(all_actions),
-        "observation.state": _describe_vector(all_observations),
-        "timestamp": _describe_scalar(timestamp_all),
-        "frame_index": _describe_scalar(frame_index_all),
-        "episode_index": _describe_scalar(episode_index_all),
-        "task_index": _describe_scalar(task_index_all),
-        "index": _describe_scalar(index_all),
-        "success": _describe_scalar(success_all),
-        "last_frame_index": _describe_scalar(last_frame_index_all),
+        "action": _describe_vector(all_actions, label="action/overall"),
+        "observation.state": _describe_vector(all_observations, label="obs/overall"),
+        "timestamp": _describe_scalar(timestamp_all, label="timestamp/overall"),
+        "frame_index": _describe_scalar(frame_index_all, label="frame_index/overall"),
+        "episode_index": _describe_scalar(episode_index_all, label="episode_index/overall"),
+        "task_index": _describe_scalar(task_index_all, label="task_index/overall"),
+        "index": _describe_scalar(index_all, label="index/overall"),
+        "success": _describe_scalar(success_all, label="success/overall"),
+        "last_frame_index": _describe_scalar(last_frame_index_all, label="last_frame_index/overall"),
     }
     stats_path = output_dir / METADATA_DIR / "stats.json"
     stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -654,6 +731,7 @@ def to_lerobotv21(
     train_split: float = 0.8,
     smoothing_cutoff: float = 1.0,
     success_only: bool = False,
+    num_workers: int = None,
 ) -> None:
     """Convert the given dataset to LeRobot v2.1 format and save to the specified output directory."""
     if not (0.0 <= train_split <= 1.0):
@@ -661,6 +739,9 @@ def to_lerobotv21(
 
     if fps <= 0:
         raise ValueError(f"fps must be a positive integer, got {fps}")
+
+    if num_workers is None:
+        num_workers = min(8, os.cpu_count() or 1)
 
     # set smoothing cutoff
     dataset.set_smoothing(cutoff=smoothing_cutoff)
@@ -671,7 +752,7 @@ def to_lerobotv21(
     joint_keys, joint_names = _collect_keys_and_joint_names(dataset)
 
     # collect downsampled data for each episode
-    records = _collect_downsampled_data(dataset, fps, joint_keys, success_only)
+    records = _collect_downsampled_data(dataset, fps, joint_keys, success_only, num_workers=num_workers)
 
     if not records:
         raise ValueError("No episodes to write.")
@@ -681,10 +762,11 @@ def to_lerobotv21(
 
     # save parquet files for each episode (output_dir/data)
     _write_parquet(
-        dataset, records, output_dir, fps, remap_episode_index, remap_task_index
+        dataset, records, output_dir, fps, remap_episode_index, remap_task_index,
+        num_workers=num_workers,
     )
-    # save_videos for each episode (output_dir/videos)
-    _write_videos(dataset, records, output_dir, fps, remap_episode_index)
+    # # save_videos for each episode (output_dir/videos)
+    # _write_videos(dataset, records, output_dir, fps, remap_episode_index, num_workers=num_workers)
     # episodes metadata and stats
     _write_metadata(
         dataset,
@@ -695,4 +777,5 @@ def to_lerobotv21(
         joint_names,
         remap_episode_index,
         remap_task_index,
+        num_workers=num_workers,
     )
