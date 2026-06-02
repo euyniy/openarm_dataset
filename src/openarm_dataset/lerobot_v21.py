@@ -110,10 +110,12 @@ def _build_fk_info(dataset: Dataset):
     if not fk_slices:
         return None
 
+    # 9D XYZ_ROT6D layout: xyz translation + first two rows of rotation matrix.
+    # Matches GR00T's ActionFormat.XYZ_ROT6D / EndEffectorPose.xyz_rot6d convention.
     ee_names = [
         f"pose_{side}.{dim}"
         for side in fk_slices
-        for dim in ("px", "py", "pz", "qw", "qx", "qy", "qz")
+        for dim in ("px", "py", "pz", "r0", "r1", "r2", "r3", "r4", "r5")
     ]
     return fk_slices, ee_names
 
@@ -135,15 +137,35 @@ def _build_default_kinematics():
     return Kinematics(setup)
 
 
+def _quat_wxyz_to_rot6d(pose_7d: np.ndarray) -> np.ndarray:
+    """Convert a 7D FK pose (px, py, pz, qw, qx, qy, qz) to 9D XYZ_ROT6D.
+
+    XYZ_ROT6D layout: [px, py, pz, R[0,0], R[0,1], R[0,2], R[1,0], R[1,1], R[1,2]]
+    i.e. first two rows of the rotation matrix flattened — matching GR00T's
+    EndEffectorPose._matrix_to_rot6d convention.
+    """
+    from scipy.spatial.transform import Rotation
+
+    xyz = pose_7d[:3]
+    quat_wxyz = pose_7d[3:]
+    quat_xyzw = quat_wxyz[[1, 2, 3, 0]]  # scipy uses xyzw order
+    R = Rotation.from_quat(quat_xyzw).as_matrix()
+    rot6d = R[:2, :].flatten()  # first two rows (6,)
+    return np.concatenate([xyz, rot6d])
+
+
 def _append_fk_poses(
     samples: list[np.ndarray],
     kinematics,
     fk_slices: dict[str, tuple[int, int]],
 ) -> list[np.ndarray]:
-    """Append FK-computed EE poses to each flat joint vector in samples."""
+    """Append FK-computed EE poses (9D XYZ_ROT6D) to each flat joint vector."""
     result = []
     for joints_flat in samples:
-        poses = [kinematics.fk(side, joints_flat[s:e]) for side, (s, e) in fk_slices.items()]
+        poses = [
+            _quat_wxyz_to_rot6d(kinematics.fk(side, joints_flat[s:e]))
+            for side, (s, e) in fk_slices.items()
+        ]
         result.append(np.concatenate([joints_flat, *poses]))
     return result
 
