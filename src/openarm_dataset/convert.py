@@ -36,11 +36,11 @@ def main():
         "--format",
         help="Format of the output dataset (default: openarm)",
         default="openarm",
-        choices=["openarm", "lerobot_v2.1", "lerobot_v3.0", "gr00t"],
+        choices=["openarm", "lerobot_v2.1", "lerobot_v3.0", "gr00t", "oopsie"],
     )
     parser.add_argument(
         "--fps",
-        help="Frames per second for the output dataset (default: 30) if the output format is lerobot_v2.1, lerobot_v3.0 or gr00t",
+        help="Frames per second for the output dataset (default: 30) if the output format is lerobot_v2.1, lerobot_v3.0, gr00t or oopsie",
         type=int,
         default=30,
     )
@@ -70,6 +70,45 @@ def main():
         default="dir",
         choices=["dir", "tar"],
     )
+    parser.add_argument(
+        "--lab-id",
+        help="lab_id attribute for the output episodes (default: the source "
+        "dataset's location) if the output format is oopsie",
+        default=None,
+    )
+    parser.add_argument(
+        "--operator-name",
+        help="operator_name attribute for the output episodes (default: the "
+        "source dataset's operator) if the output format is oopsie",
+        default=None,
+    )
+    parser.add_argument(
+        "--annotator-name",
+        help="Annotator name under which rollout notes from --eval-metadata "
+        "are pre-filled (default: rollout_eval) if the output format is oopsie",
+        default="rollout_eval",
+    )
+    parser.add_argument(
+        "--policy-name",
+        help="robot_profile.policy_name for the output episodes (default: "
+        "derived from the source dataset) if the output format is oopsie",
+        default=None,
+    )
+    parser.add_argument(
+        "--gripper-name",
+        help="robot_profile.gripper_name for the output episodes (default: "
+        "derived from the source dataset) if the output format is oopsie",
+        default=None,
+    )
+    parser.add_argument(
+        "--eval-metadata",
+        help="Path to a rollout eval_metadata.yaml to merge into "
+        "episode_annotations (default: auto-discover a sibling "
+        "eval_metadata.yaml next to the input dataset's metadata.yaml) if "
+        "the output format is oopsie",
+        type=pathlib.Path,
+        default=None,
+    )
 
     args = parser.parse_args()
     write_kwargs = {"format": args.format}
@@ -78,6 +117,14 @@ def main():
         write_kwargs["smoothing_cutoff"] = args.smoothing_cutoff
         write_kwargs["train_split"] = args.train_split
         write_kwargs["success_only"] = args.success_only
+    elif args.format == "oopsie":
+        write_kwargs["fps"] = args.fps
+        write_kwargs["lab_id"] = args.lab_id
+        write_kwargs["operator_name"] = args.operator_name
+        write_kwargs["annotator_name"] = args.annotator_name
+        write_kwargs["policy_name"] = args.policy_name
+        write_kwargs["gripper_name"] = args.gripper_name
+        write_kwargs["eval_metadata_path"] = args.eval_metadata
     else:
         write_kwargs["camera_format"] = args.camera_format
 

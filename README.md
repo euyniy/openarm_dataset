@@ -134,19 +134,48 @@ Convert a dataset:
 
 ```bash
 openarm-dataset-convert <input> <output> \
-    [--format {openarm,lerobot_v2.1,gr00t}] \
+    [--format {openarm,lerobot_v2.1,gr00t,oopsie}] \
     [--camera-format {dir,tar}] # default dir (openarm only); tar packs each \
                                 # camera into one .tar archive \
-    [--fps INT]                # default 30 (lerobot/gr00t only) \
+    [--fps INT]                # default 30 (lerobot/gr00t/oopsie only) \
     [--smoothing-cutoff FLOAT] # default 1.0 (lerobot/gr00t only) \
     [--train-split FLOAT]      # default 0.8 (lerobot/gr00t only) \
-    [--success-only]           # lerobot/gr00t only
+    [--success-only]           # lerobot/gr00t only \
+    [--lab-id STR]             # oopsie only, default: source dataset's location \
+    [--operator-name STR]      # oopsie only, default: source dataset's operator \
+    [--annotator-name STR]     # oopsie only, default: rollout_eval \
+    [--policy-name STR]        # oopsie only, default: derived from the source dataset \
+    [--gripper-name STR]       # oopsie only, default: derived from the source dataset \
+    [--eval-metadata PATH]     # oopsie only, default: auto-discover a sibling \
+                                # eval_metadata.yaml next to the input's metadata.yaml
 ```
 
 The `--fps`, `--smoothing-cutoff`, `--train-split`, and `--success-only`
 flags apply only when `--format lerobot_v2.1` or `--format gr00t`.
 The `gr00t` format produces a LeRobot v2.1 dataset plus a GR00T-compatible
 `meta/modality.json` (see [Isaac-GR00T data preparation](https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/data_preparation.md)).
+
+The `oopsie` format writes one `oopsiedata_format_v1` HDF5 file plus one MP4
+per camera per episode (as siblings, `<episode_id>.h5` and
+`<episode_id>_<camera>.mp4`), for use with the
+[oopsie-tools](https://github.com/oopsie-data/oopsie-tools) annotation UI.
+If a rollout eval harness wrote a sidecar `eval_metadata.yaml` next to the
+input dataset's `metadata.yaml` (with per-episode `success`/`note`/`source`/
+`timestamp` fields), it is auto-discovered and merged in as a pre-filled
+`episode_annotations/<annotator_name>` group — so a human annotator starts
+from the rollout's own notes instead of a blank slate. To review and refine
+those pre-filled notes in place, launch oopsie-tools' browse-only annotator
+against the same annotator name:
+
+```bash
+uv run python -m oopsie_tools.annotation_tool.annotator_server \
+    --samples-dir <output> --annotator-name rollout_eval
+```
+
+(A different `--annotator-name` starts an independent annotation instead of
+editing the pre-filled one — also valid, per the schema's
+"multiple annotators can each have an opinion" design, but it won't show the
+rollout note as a pre-fill.)
 
 Upload a dataset to the Hugging Face Hub:
 

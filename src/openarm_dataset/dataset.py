@@ -448,6 +448,10 @@ class Dataset:
             from .lerobot_v21 import to_gr00t
 
             return to_gr00t(self, output, **options)
+        elif format == "oopsie":
+            from .oopsie import to_oopsie
+
+            return to_oopsie(self, output, **options)
         elif format == "rrd":
             try:
                 from .rrd import to_rrd
