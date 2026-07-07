@@ -21,6 +21,14 @@ import sys
 import openarm_dataset
 
 
+def _parse_optional_float(value: str) -> float | None:
+    """Parse a float or common disable tokens."""
+    lowered = value.strip().lower()
+    if lowered in {"none", "off", "disable", "disabled"}:
+        return None
+    return float(value)
+
+
 def main():
     """Validate OpenArm dataset."""
     parser = argparse.ArgumentParser(description="Validate OpenArm dataset")
@@ -33,26 +41,35 @@ def main():
         "--qpos-jump-threshold",
         "--jump-threshold",
         dest="qpos_jump_threshold",
-        type=float,
+        type=_parse_optional_float,
         default=1.0,
         metavar="RAD",
-        help="Flag qpos frame-to-frame deltas above this value (rad); disabled if not set",
+        help=(
+            "Flag qpos frame-to-frame deltas above this value "
+            "(rad, default: 1.0; use 'none' to disable)"
+        ),
     )
     parser.add_argument(
         "--qpos-absmax",
         "--absmax-warn",
         dest="qpos_absmax",
-        type=float,
+        type=_parse_optional_float,
         default=6.28,
         metavar="RAD",
-        help="Flag qpos values whose absolute value exceeds this threshold; disabled if not set",
+        help=(
+            "Flag qpos values whose absolute value exceeds this threshold "
+            "(rad, default: 6.28; use 'none' to disable)"
+        ),
     )
     parser.add_argument(
         "--min-duration",
-        type=float,
+        type=_parse_optional_float,
         default=2.0,
         metavar="SEC",
-        help="Flag episodes shorter than this duration (seconds); disabled if not set",
+        help=(
+            "Flag episodes shorter than this duration "
+            "(seconds, default: 2.0; use 'none' to disable)"
+        ),
     )
     args = parser.parse_args()
     dataset = openarm_dataset.Dataset(args.input)
