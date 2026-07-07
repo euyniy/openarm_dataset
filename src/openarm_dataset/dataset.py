@@ -172,7 +172,12 @@ class Dataset:
                             if len(ts) >= 2:
                                 ts_ns = pc.cast(ts, pa.int64())
                                 duration = (ts_ns[-1].as_py() - ts_ns[0].as_py()) / 1e9
-                        except (OSError, ValueError, KeyError, pa.ArrowException) as exc:
+                        except (
+                            OSError,
+                            ValueError,
+                            KeyError,
+                            pa.ArrowException,
+                        ) as exc:
                             if on_error is not None:
                                 on_error(
                                     f"episode {ep_id} obs: failed to load duration ({exc})"
@@ -192,7 +197,9 @@ class Dataset:
                 obs_qpos = {}
                 if qpos_jump_threshold is not None:
                     try:
-                        obs_qpos = self._load_qpos_values("obs", episode, use_unixtime=True)
+                        obs_qpos = self._load_qpos_values(
+                            "obs", episode, use_unixtime=True
+                        )
                     except (OSError, ValueError, KeyError, pa.ArrowException) as exc:
                         if on_error is not None:
                             on_error(f"episode {ep_id} obs: failed to load ({exc})")
