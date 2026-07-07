@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import shutil
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -57,13 +58,25 @@ class Dataset:
         """Set smoothing."""
         self._smoothing_cutoff = cutoff
 
-    def validate(self, on_error=None) -> bool:
+    def validate(
+        self,
+        on_error=None,
+        qpos_jump_threshold: float | None = None,
+        qpos_absmax: float | None = None,
+        min_duration: float | None = None,
+    ) -> bool:
         """Validate this dataset.
 
         Args:
             on_error: Optional callable that is called with an error message
                 string for each validation error found. If ``None``, errors
                 are not reported.
+            qpos_jump_threshold: If set, flag qpos frame-to-frame deltas above
+                this value (radians) as abrupt jumps.
+            qpos_absmax: If set, flag qpos values whose absolute value
+                exceeds this threshold.
+            min_duration: If set, flag episodes whose duration is shorter
+                than this value (seconds).
 
         Returns:
             ``True`` if the dataset is valid, ``False`` otherwise.
@@ -72,14 +85,22 @@ class Dataset:
         valid = True
         checked_paths = set()
         for episode in self.meta.episodes:
+            ep_id = episode["id"]
+
+            # File-level checks.
             for type_name in ("obs", "action"):
                 for attribute in self.get_embodiment_attributes(type_name, episode):
                     path = attribute["path"]
                     if path in checked_paths or not path.exists():
                         continue
                     checked_paths.add(path)
-                    file_meta = pq.read_metadata(path)
+                    rel = path.relative_to(self.root_path)
+                    check_qpos_absmax = (
+                        qpos_absmax is not None and attribute["name"] == "qpos"
+                    )
+                    # Fast path for null detection via parquet metadata.
                     has_null = False
+                    file_meta = pq.read_metadata(path)
                     for rg_index in range(file_meta.num_row_groups):
                         row_group = file_meta.row_group(rg_index)
                         for col_index in range(row_group.num_columns):
@@ -97,27 +118,162 @@ class Dataset:
                                 break
                         if has_null:
                             break
-                    if not has_null:
-                        table = pq.read_table(path)
-                        for col_name in table.schema.names:
-                            if col_name == "timestamp":
-                                continue
-                            col = table.column(col_name)
-                            flat = col.combine_chunks().values
-                            if (
-                                pa.types.is_floating(flat.type)
-                                and pc.any(pc.is_nan(flat)).as_py()
-                            ):
-                                has_null = True
-                                break
+
                     if has_null:
                         if on_error is not None:
+                            on_error(f"{rel}: includes null values")
+                        valid = False
+
+                    # Do not short-circuit after null detection; continue scanning
+                    # values to report non-finite/qpos absmax in the same file.
+                    table = pq.read_table(path)
+                    has_nonfinite = False
+                    for col_name in table.schema.names:
+                        if col_name == "timestamp":
+                            continue
+                        col = table.column(col_name)
+                        flat = col.combine_chunks().values
+                        if not pa.types.is_floating(flat.type):
+                            continue
+
+                        is_finite = pc.is_finite(flat)
+                        if not has_nonfinite and not pc.all(is_finite).as_py():
+                            has_nonfinite = True
+                            if on_error is not None:
+                                on_error(f"{rel}: includes NaN or Inf values")
+                            valid = False
+
+                        if check_qpos_absmax and col_name == "qpos":
+                            col_absmax = pc.max(
+                                pc.if_else(is_finite, pc.abs(flat), None)
+                            ).as_py()
+                            if col_absmax is not None and col_absmax > qpos_absmax:
+                                if on_error is not None:
+                                    on_error(
+                                        f"{rel} (qpos): "
+                                        f"absmax={col_absmax:.4f} > {qpos_absmax}"
+                                    )
+                                valid = False
+
+            # Episode-level checks.
+            if min_duration is not None or qpos_jump_threshold is not None:
+                # Fast path: if only duration is requested, read just one
+                # timestamp column instead of loading full obs/action DataFrames.
+                if min_duration is not None and qpos_jump_threshold is None:
+                    duration = None
+                    for attr in self.get_embodiment_attributes("obs", episode):
+                        path = attr["path"]
+                        if not path.exists():
+                            continue
+                        try:
+                            ts = pq.read_table(path, columns=["timestamp"]).column(
+                                "timestamp"
+                            )
+                            if len(ts) >= 2:
+                                ts_ns = pc.cast(ts, pa.int64())
+                                duration = (ts_ns[-1].as_py() - ts_ns[0].as_py()) / 1e9
+                        except (OSError, ValueError, KeyError, pa.ArrowException) as exc:
+                            if on_error is not None:
+                                on_error(
+                                    f"episode {ep_id} obs: failed to load duration ({exc})"
+                                )
+                        break
+
+                    if duration is not None and duration < min_duration:
+                        if on_error is not None:
                             on_error(
-                                f"{path.relative_to(self.root_path)}: "
-                                "includes null values"
+                                f"episode {ep_id}: "
+                                f"duration={duration:.2f}s < {min_duration}s"
                             )
                         valid = False
+                    continue
+
+                obs_for_duration = None
+                obs_qpos = {}
+                if qpos_jump_threshold is not None:
+                    try:
+                        obs_qpos = self._load_qpos_values("obs", episode, use_unixtime=True)
+                    except (OSError, ValueError, KeyError, pa.ArrowException) as exc:
+                        if on_error is not None:
+                            on_error(f"episode {ep_id} obs: failed to load ({exc})")
+                        continue
+                    obs_for_duration = obs_qpos
+                elif min_duration is not None:
+                    try:
+                        obs_for_duration = self.load_obs(episode, use_unixtime=True)
+                    except (OSError, ValueError, KeyError, pa.ArrowException) as exc:
+                        if on_error is not None:
+                            on_error(f"episode {ep_id} obs: failed to load ({exc})")
+                        continue
+
+                if min_duration is not None:
+                    duration = None
+                    for df in obs_for_duration.values():
+                        if len(df) >= 2:
+                            duration = float(df.index[-1] - df.index[0])
+                            break
+                    if duration is not None and duration < min_duration:
+                        if on_error is not None:
+                            on_error(
+                                f"episode {ep_id}: "
+                                f"duration={duration:.2f}s < {min_duration}s"
+                            )
+                        valid = False
+
+                if qpos_jump_threshold is not None:
+                    try:
+                        action_qpos = self._load_qpos_values(
+                            "action",
+                            episode,
+                            use_unixtime=True,
+                        )
+                    except (OSError, ValueError, KeyError, pa.ArrowException) as exc:
+                        if on_error is not None:
+                            on_error(f"episode {ep_id} action: failed to load ({exc})")
+                        action_qpos = {}
+
+                    for source, data_dict in (
+                        ("obs", obs_qpos),
+                        ("action", action_qpos),
+                    ):
+                        for key, df in data_dict.items():
+                            arr = df.values
+                            if arr.shape[0] < 2:
+                                continue
+                            # Vectorized frame-to-frame jump count across all joints.
+                            n_bad = int(
+                                np.count_nonzero(
+                                    np.abs(arr[1:] - arr[:-1]) > qpos_jump_threshold
+                                )
+                            )
+                            if n_bad > 0:
+                                if on_error is not None:
+                                    on_error(
+                                        f"episode {ep_id} {source}/{key}: "
+                                        f"{n_bad} abrupt jump(s) > {qpos_jump_threshold} rad"
+                                    )
+                                valid = False
+
         return valid
+
+    def _load_qpos_values(
+        self,
+        type_: str,
+        episode: dict,
+        use_unixtime: bool = False,
+        cutoff: float = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Load only qpos attributes for the given stream type."""
+        values = {}
+        for attribute in self.get_embodiment_attributes(type_, episode):
+            if attribute["name"] != "qpos":
+                continue
+            values[attribute["key"]] = self._load_embodiment_value(
+                attribute,
+                use_unixtime=use_unixtime,
+                cutoff=cutoff or self._smoothing_cutoff,
+            )
+        return values
 
     @property
     def num_episodes(self) -> int:

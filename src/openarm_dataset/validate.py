@@ -29,9 +29,39 @@ def main():
         help="Path of an OpenArm dataset to validate",
         type=pathlib.Path,
     )
+    parser.add_argument(
+        "--qpos-jump-threshold",
+        "--jump-threshold",
+        dest="qpos_jump_threshold",
+        type=float,
+        default=1.0,
+        metavar="RAD",
+        help="Flag qpos frame-to-frame deltas above this value (rad); disabled if not set",
+    )
+    parser.add_argument(
+        "--qpos-absmax",
+        "--absmax-warn",
+        dest="qpos_absmax",
+        type=float,
+        default=6.28,
+        metavar="RAD",
+        help="Flag qpos values whose absolute value exceeds this threshold; disabled if not set",
+    )
+    parser.add_argument(
+        "--min-duration",
+        type=float,
+        default=2.0,
+        metavar="SEC",
+        help="Flag episodes shorter than this duration (seconds); disabled if not set",
+    )
     args = parser.parse_args()
     dataset = openarm_dataset.Dataset(args.input)
-    valid = dataset.validate(on_error=lambda error: print(error, file=sys.stderr))
+    valid = dataset.validate(
+        on_error=lambda error: print(error, file=sys.stderr),
+        qpos_jump_threshold=args.qpos_jump_threshold,
+        qpos_absmax=args.qpos_absmax,
+        min_duration=args.min_duration,
+    )
     if not valid:
         sys.exit(1)
 
