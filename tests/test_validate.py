@@ -18,6 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 import pandas as pd
+import yaml
 from openarm_dataset.dataset import Dataset
 
 DATASET_DIR = Path(__file__).parent / "fixture" / "dataset_0.4.0_qpos"
@@ -279,6 +280,100 @@ def test_validate_detects_short_episode():
     errors = []
     assert not Dataset(DATASET_DIR).validate(on_error=errors.append, min_duration=2.0)
     assert errors == ["episodes/3: duration=0.81s < 2.0s"]
+
+
+def test_validate_detects_long_episode():
+    errors = []
+    assert not Dataset(DATASET_DIR).validate(on_error=errors.append, max_duration=0.5)
+    assert errors == [
+        "episodes/0: duration=2.98s > 0.5s",
+        "episodes/3: duration=0.81s > 0.5s",
+    ]
+
+
+def test_validate_max_duration_disabled_by_default():
+    errors = []
+    assert Dataset(DATASET_DIR).validate(on_error=errors.append, min_duration=0.5)
+    assert errors == []
+
+
+def test_validate_reports_both_duration_bounds():
+    errors = []
+    assert not Dataset(DATASET_DIR).validate(
+        on_error=errors.append, min_duration=0.9, max_duration=1.0
+    )
+    assert errors == [
+        "episodes/0: duration=2.98s > 1.0s",
+        "episodes/3: duration=0.81s < 0.9s",
+    ]
+
+
+def test_validate_detects_episode_without_data(tmp_path):
+    # A camera-only episode has no parquet for the other checks to read, so
+    # without this check it passes as valid.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    shutil.rmtree(tmp_path / "episodes" / "0" / "obs")
+    shutil.rmtree(tmp_path / "episodes" / "0" / "action")
+
+    errors = []
+    assert not Dataset(tmp_path).validate(on_error=errors.append)
+    assert errors == [
+        "episodes/0: no obs data",
+        "episodes/0: no action data",
+    ]
+
+
+def test_validate_detects_episode_without_action_data(tmp_path):
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    shutil.rmtree(tmp_path / "episodes" / "0" / "action")
+
+    errors = []
+    assert not Dataset(tmp_path).validate(on_error=errors.append)
+    assert errors == ["episodes/0: no action data"]
+
+
+def test_validate_accepts_undeclared_embodiment_without_data(tmp_path):
+    # `equipment.embodiments` declares a lifter that plenty of real datasets
+    # never record; that is not a missing-data error.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    for episode_id in ("0", "3"):
+        for type_name in ("obs", "action"):
+            shutil.rmtree(tmp_path / "episodes" / episode_id / type_name / "lifter")
+
+    errors = []
+    assert Dataset(tmp_path).validate(on_error=errors.append)
+    assert errors == []
+
+
+def test_validate_marks_episode_without_data_invalid(tmp_path):
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    shutil.rmtree(tmp_path / "episodes" / "0" / "obs")
+    shutil.rmtree(tmp_path / "episodes" / "0" / "action")
+
+    assert not Dataset(tmp_path).validate(update_metadata=True)
+    meta = yaml.safe_load((tmp_path / "metadata.yaml").read_text())
+    assert [(ep["id"], ep["valid"]) for ep in meta["episodes"]] == [
+        ("0", False),
+        ("3", True),
+    ]
+
+
+def test_validate_cli_max_duration(tmp_path):
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openarm_dataset.validate",
+            str(tmp_path),
+            "--max-duration",
+            "0.9",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "episodes/0: duration=2.98s > 0.9s" in result.stderr
 
 
 def test_validate_accepts_clean_dataset():
