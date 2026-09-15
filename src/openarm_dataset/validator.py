@@ -33,6 +33,7 @@ class Validator:
         qpos_jump_threshold: float | None = None,
         qpos_absmax: float | None = None,
         min_duration: float | None = None,
+        max_duration: float | None = None,
     ):
         """Initialize Validator.
 
@@ -49,6 +50,8 @@ class Validator:
                 exceeds this threshold (radians).
             min_duration: If set, flag episodes whose duration is shorter
                 than this value (seconds).
+            max_duration: If set, flag episodes whose duration is longer
+                than this value (seconds).
 
         """
         self._dataset = dataset
@@ -57,6 +60,7 @@ class Validator:
         self._qpos_jump_threshold = qpos_jump_threshold
         self._qpos_absmax = qpos_absmax
         self._min_duration = min_duration
+        self._max_duration = max_duration
 
     def validate(self) -> bool:
         """Validate the dataset."""
@@ -74,14 +78,32 @@ class Validator:
 
     def _validate_episode(self, episode: Episode) -> bool:
         """Validate the given episode."""
+        valid = self._validate_data_presence(episode)
         null_paths = self._collect_null_paths(episode)
-        valid = not null_paths
+        if null_paths:
+            valid = False
         # Files with nulls are skipped: their values cannot be compared
         # against a threshold, and they are already reported.
         if not self._validate_qpos(episode, null_paths):
             valid = False
         if not self._validate_duration(episode):
             valid = False
+        return valid
+
+    def _validate_data_presence(self, episode: Episode) -> bool:
+        """Check that the episode recorded any obs and action data at all.
+
+        An episode whose parquet files are missing entirely - a camera-only
+        recording, say - has nothing for the other checks to read, so they
+        all pass it silently. Presence is checked against what the episode
+        itself recorded, not against `equipment.embodiments`: an embodiment
+        may be declared and legitimately never recorded.
+        """
+        valid = True
+        for type_name in ("obs", "action"):
+            if not self._dataset.get_embodiment_attributes(type_name, episode):
+                self._report_error(f"episodes/{episode['id']}: no {type_name} data")
+                valid = False
         return valid
 
     def _report_error(self, message: str):
@@ -148,17 +170,26 @@ class Validator:
         return valid
 
     def _validate_duration(self, episode: Episode) -> bool:
-        """Check the episode duration against the minimum duration."""
-        if self._min_duration is None:
+        """Check the episode duration against the duration thresholds."""
+        if self._min_duration is None and self._max_duration is None:
             return True
         duration = self._episode_duration(episode)
-        if duration is None or duration >= self._min_duration:
+        if duration is None:
             return True
-        self._report_error(
-            f"episodes/{episode['id']}: "
-            f"duration={duration:.2f}s < {self._min_duration}s"
-        )
-        return False
+        valid = True
+        if self._min_duration is not None and duration < self._min_duration:
+            self._report_error(
+                f"episodes/{episode['id']}: "
+                f"duration={duration:.2f}s < {self._min_duration}s"
+            )
+            valid = False
+        if self._max_duration is not None and duration > self._max_duration:
+            self._report_error(
+                f"episodes/{episode['id']}: "
+                f"duration={duration:.2f}s > {self._max_duration}s"
+            )
+            valid = False
+        return valid
 
     def _episode_duration(self, episode: Episode) -> float | None:
         """Return the duration of the longest obs stream in seconds.

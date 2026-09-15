@@ -155,6 +155,7 @@ class Dataset:
         qpos_jump_threshold: float | None = None,
         qpos_absmax: float | None = None,
         min_duration: float | None = None,
+        max_duration: float | None = None,
     ) -> bool:
         """Validate this dataset.
 
@@ -171,6 +172,8 @@ class Dataset:
                 exceeds this threshold (radians).
             min_duration: If set, flag episodes whose duration is shorter
                 than this value (seconds).
+            max_duration: If set, flag episodes whose duration is longer
+                than this value (seconds).
 
         Returns:
             ``True`` if the dataset is valid, ``False`` otherwise.
@@ -186,6 +189,7 @@ class Dataset:
             qpos_jump_threshold=qpos_jump_threshold,
             qpos_absmax=qpos_absmax,
             min_duration=min_duration,
+            max_duration=max_duration,
         )
         valid = validator.validate()
         return valid

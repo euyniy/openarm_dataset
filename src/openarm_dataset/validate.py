@@ -66,6 +66,14 @@ def main():
         default=2.0,
         metavar="SECOND",
     )
+    parser.add_argument(
+        "--max-duration",
+        help="Flag episodes longer than this duration "
+        "(default: %(default)s, 'none' to disable)",
+        type=_threshold,
+        default=None,
+        metavar="SECOND",
+    )
     args = parser.parse_args()
     dataset = openarm_dataset.Dataset(args.input)
     valid = dataset.validate(
@@ -74,6 +82,7 @@ def main():
         qpos_jump_threshold=args.qpos_jump_threshold,
         qpos_absmax=args.qpos_absmax,
         min_duration=args.min_duration,
+        max_duration=args.max_duration,
     )
     if not valid:
         sys.exit(1)
