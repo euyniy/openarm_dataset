@@ -23,14 +23,18 @@ from openarm_dataset.dataset import Dataset
 
 DATASET_DIR = Path(__file__).parent / "fixture" / "dataset_0.4.0_qpos"
 
-# The CLI enables the qpos and duration thresholds by default. Tests that
-# only exercise the null check turn them off.
+# The CLI enables the qpos, duration and stream thresholds by default. Tests
+# that only exercise the null check turn them off.
 DISABLE_THRESHOLDS = [
     "--qpos-jump-threshold",
     "none",
     "--qpos-absmax",
     "none",
     "--min-duration",
+    "none",
+    "--max-stream-desync",
+    "none",
+    "--max-sample-gap",
     "none",
 ]
 
@@ -41,6 +45,20 @@ def _inject_null_qpos(state_path):
     values[0] = None
     df["qpos"] = values
     df.to_parquet(state_path)
+
+
+def _truncate_stream(state_path, keep):
+    """Cut a stream short, as an arm that stops reporting mid-recording does."""
+    df = pd.read_parquet(state_path)
+    df.head(keep).to_parquet(state_path, index=False)
+
+
+def _drop_middle_samples(state_path, start, stop):
+    """Drop a run of samples, leaving the stream's span intact but holed."""
+    df = pd.read_parquet(state_path)
+    pd.concat([df.iloc[:start], df.iloc[stop:]], ignore_index=True).to_parquet(
+        state_path, index=False
+    )
 
 
 def _inject_null_inside_qpos_list(state_path):
@@ -305,6 +323,103 @@ def test_validate_reports_both_duration_bounds():
     assert errors == [
         "episodes/0: duration=2.98s > 1.0s",
         "episodes/3: duration=0.81s < 0.9s",
+    ]
+
+
+def test_validate_detects_truncated_stream(tmp_path):
+    # Feedback that drops out mid-recording leaves one stream short while the
+    # rest run on. Every file is still complete and NaN-free, so only the
+    # comparison between streams can see it.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    _truncate_stream(
+        tmp_path / "episodes" / "0" / "obs" / "arms" / "left" / "state.parquet", 250
+    )
+
+    errors = []
+    assert not Dataset(tmp_path).validate(on_error=errors.append, max_stream_desync=1.0)
+    assert errors == [
+        "episodes/0: stream durations differ by 1.99s > 1.0s "
+        "(obs/arms/left/state.parquet=1.00s, obs/arms/right/state.parquet=2.98s)"
+    ]
+
+
+def test_validate_detects_mid_episode_gap(tmp_path):
+    # The other half of the same fault: feedback that comes back leaves the
+    # stream the right length overall, with a hole in the middle.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    _drop_middle_samples(
+        tmp_path / "episodes" / "0" / "obs" / "arms" / "left" / "state.parquet",
+        100,
+        600,
+    )
+
+    errors = []
+    assert not Dataset(tmp_path).validate(on_error=errors.append, max_sample_gap=1.0)
+    assert errors == [
+        "episodes/0/obs/arms/left/state.parquet: 2.01s gap between samples > 1.0s"
+    ]
+
+
+def test_validate_gap_survives_a_stream_that_stays_in_sync(tmp_path):
+    # Dropping samples from the middle doesn't move either end, so the desync
+    # check passes it — the gap check is what has to catch this one.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    _drop_middle_samples(
+        tmp_path / "episodes" / "0" / "obs" / "arms" / "left" / "state.parquet",
+        100,
+        600,
+    )
+
+    errors = []
+    assert Dataset(tmp_path).validate(on_error=errors.append, max_stream_desync=1.0)
+    assert errors == []
+
+
+def test_validate_stream_checks_disabled_by_default(tmp_path):
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    _truncate_stream(
+        tmp_path / "episodes" / "0" / "obs" / "arms" / "left" / "state.parquet", 250
+    )
+
+    errors = []
+    assert Dataset(tmp_path).validate(on_error=errors.append)
+    assert errors == []
+
+
+def test_validate_stream_checks_accept_differing_sample_rates():
+    # obs runs at 250 Hz and action at ~31 Hz in the fixture, so their spans
+    # differ by one slow sample. That is normal, not a desync.
+    errors = []
+    assert Dataset(DATASET_DIR).validate(
+        on_error=errors.append, max_stream_desync=1.0, max_sample_gap=1.0
+    )
+    assert errors == []
+
+
+def test_validate_cli_detects_truncated_stream(tmp_path):
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    _truncate_stream(
+        tmp_path / "episodes" / "0" / "obs" / "arms" / "left" / "state.parquet", 250
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "openarm_dataset.validate",
+            str(tmp_path),
+            "--min-duration",
+            "none",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "episodes/0: stream durations differ by 1.99s > 1.0s" in result.stderr
+
+    meta = yaml.safe_load((tmp_path / "metadata.yaml").read_text())
+    assert [(ep["id"], ep["valid"]) for ep in meta["episodes"]] == [
+        ("0", False),
+        ("3", True),
     ]
 
 

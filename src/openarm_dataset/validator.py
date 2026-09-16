@@ -14,6 +14,8 @@
 
 """Validator for OpenArm Dataset."""
 
+from pathlib import Path
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -34,6 +36,8 @@ class Validator:
         qpos_absmax: float | None = None,
         min_duration: float | None = None,
         max_duration: float | None = None,
+        max_stream_desync: float | None = None,
+        max_sample_gap: float | None = None,
     ):
         """Initialize Validator.
 
@@ -52,6 +56,12 @@ class Validator:
                 than this value (seconds).
             max_duration: If set, flag episodes whose duration is longer
                 than this value (seconds).
+            max_stream_desync: If set, flag episodes whose streams do not all
+                cover the same span of time, differing by more than this
+                value (seconds).
+            max_sample_gap: If set, flag streams that stop recording mid-episode,
+                leaving a gap between consecutive samples longer than this
+                value (seconds).
 
         """
         self._dataset = dataset
@@ -61,6 +71,8 @@ class Validator:
         self._qpos_absmax = qpos_absmax
         self._min_duration = min_duration
         self._max_duration = max_duration
+        self._max_stream_desync = max_stream_desync
+        self._max_sample_gap = max_sample_gap
 
     def validate(self) -> bool:
         """Validate the dataset."""
@@ -88,6 +100,14 @@ class Validator:
             valid = False
         if not self._validate_duration(episode):
             valid = False
+        # Both checks read every stream's timestamps, so they share one read -
+        # and neither being asked for means not reading them at all.
+        if self._max_stream_desync is not None or self._max_sample_gap is not None:
+            streams = self._stream_timestamps(episode)
+            if not self._validate_stream_desync(episode, streams):
+                valid = False
+            if not self._validate_sample_gaps(streams):
+                valid = False
         return valid
 
     def _validate_data_presence(self, episode: Episode) -> bool:
@@ -212,6 +232,98 @@ class Validator:
         if not durations:
             return None
         return max(durations)
+
+    def _stream_timestamps(
+        self, episode: Episode
+    ) -> list[tuple[str, Path, np.ndarray]]:
+        """Every stream of the episode as (episode-relative key, path, timestamps).
+
+        One entry per parquet file - a `state.parquet` carries several
+        attributes on a single clock, so the file, not the attribute, is the
+        stream. Read once here because the two checks below both need it.
+        """
+        streams = []
+        checked_paths = set()
+        episode_path = self._dataset.episode_path(episode)
+        for type_name in ("obs", "action"):
+            for attribute in self._dataset.get_embodiment_attributes(
+                type_name, episode
+            ):
+                path = attribute["path"]
+                if path in checked_paths or not path.exists():
+                    continue
+                checked_paths.add(path)
+                timestamps = pq.read_table(path, columns=["timestamp"]).column(
+                    "timestamp"
+                )
+                streams.append(
+                    (
+                        str(path.relative_to(episode_path)),
+                        path,
+                        timestamps.cast(pa.int64()).to_numpy(zero_copy_only=False),
+                    )
+                )
+        return streams
+
+    def _validate_stream_desync(
+        self, episode: Episode, streams: list[tuple[str, Path, np.ndarray]]
+    ) -> bool:
+        """Check that every stream of the episode covers the same span of time.
+
+        All of an episode's streams are recorded in one window, so a stream
+        that ends early did not finish: the arm dropped its feedback and the
+        recorder kept going, leaving cameras and `action` running against an
+        `obs` stream that stopped minutes earlier. Nothing else here catches
+        it - every file on its own is complete and free of nulls - and the
+        duration check makes it worse, since it measures `obs` and so reports
+        the truncated stream as a short episode rather than a broken one.
+        """
+        if self._max_stream_desync is None or len(streams) < 2:
+            return True
+        spans = [(key, self._span(timestamps)) for key, _, timestamps in streams]
+        shortest = min(spans, key=lambda item: item[1])
+        longest = max(spans, key=lambda item: item[1])
+        desync = longest[1] - shortest[1]
+        if desync <= self._max_stream_desync:
+            return True
+        self._report_error(
+            f"episodes/{episode['id']}: stream durations differ by {desync:.2f}s "
+            f"> {self._max_stream_desync}s "
+            f"({shortest[0]}={shortest[1]:.2f}s, {longest[0]}={longest[1]:.2f}s)"
+        )
+        return False
+
+    def _validate_sample_gaps(
+        self, streams: list[tuple[str, Path, np.ndarray]]
+    ) -> bool:
+        """Check that no stream stops and resumes mid-episode.
+
+        The other half of the same hardware fault as `_validate_stream_desync`:
+        feedback that drops out and comes back leaves the stream the right
+        length overall, with a hole in the middle that no threshold on values
+        can see.
+        """
+        if self._max_sample_gap is None:
+            return True
+        valid = True
+        for _, path, timestamps in streams:
+            if len(timestamps) < 2:
+                continue
+            gap = np.diff(timestamps).max() / 1e9
+            if gap > self._max_sample_gap:
+                self._report_error(
+                    f"{self._relative_path(path)}: {gap:.2f}s gap between "
+                    f"samples > {self._max_sample_gap}s"
+                )
+                valid = False
+        return valid
+
+    @staticmethod
+    def _span(timestamps: np.ndarray) -> float:
+        """Seconds from a stream's first sample to its last."""
+        if len(timestamps) < 2:
+            return 0.0
+        return float(timestamps[-1] - timestamps[0]) / 1e9
 
     def _has_null(self, path) -> bool:
         file_meta = pq.read_metadata(path)
