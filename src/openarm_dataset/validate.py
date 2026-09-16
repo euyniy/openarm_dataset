@@ -74,6 +74,24 @@ def main():
         default=None,
         metavar="SECOND",
     )
+    parser.add_argument(
+        "--max-stream-desync",
+        help="Flag episodes whose streams do not all cover the same span of "
+        "time, differing by more than this "
+        "(default: %(default)s, 'none' to disable)",
+        type=_threshold,
+        default=1.0,
+        metavar="SECOND",
+    )
+    parser.add_argument(
+        "--max-sample-gap",
+        help="Flag streams that stop recording mid-episode, leaving a gap "
+        "between consecutive samples longer than this "
+        "(default: %(default)s, 'none' to disable)",
+        type=_threshold,
+        default=1.0,
+        metavar="SECOND",
+    )
     args = parser.parse_args()
     dataset = openarm_dataset.Dataset(args.input)
     valid = dataset.validate(
@@ -83,6 +101,8 @@ def main():
         qpos_absmax=args.qpos_absmax,
         min_duration=args.min_duration,
         max_duration=args.max_duration,
+        max_stream_desync=args.max_stream_desync,
+        max_sample_gap=args.max_sample_gap,
     )
     if not valid:
         sys.exit(1)
