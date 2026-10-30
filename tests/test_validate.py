@@ -606,9 +606,7 @@ def test_validate_detects_camera_frame_gap(tmp_path):
 
     errors = []
     assert not Dataset(tmp_path).validate(on_error=errors.append, max_sample_gap=1.0)
-    assert errors == [
-        "episodes/0/cameras/ceiling: 1.50s gap between samples > 1.0s"
-    ]
+    assert errors == ["episodes/0/cameras/ceiling: 1.50s gap between samples > 1.0s"]
 
 
 def test_validate_detects_stream_stopping_early(tmp_path):
