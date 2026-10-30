@@ -36,6 +36,8 @@ DISABLE_THRESHOLDS = [
     "none",
     "--max-sample-gap",
     "none",
+    "--max-stream-early-stop",
+    "none",
 ]
 
 
@@ -388,10 +390,12 @@ def test_validate_stream_checks_disabled_by_default(tmp_path):
 
 def test_validate_stream_checks_accept_differing_sample_rates():
     # obs runs at 250 Hz and action at ~31 Hz in the fixture, so their spans
-    # differ by one slow sample. That is normal, not a desync.
+    # differ by one slow sample (0.03s). That is normal, not a desync - and the
+    # thresholds here are the CLI defaults, so this is what keeps them clear of
+    # the slowest stream a dataset legitimately holds.
     errors = []
     assert Dataset(DATASET_DIR).validate(
-        on_error=errors.append, max_stream_desync=1.0, max_sample_gap=1.0
+        on_error=errors.append, max_stream_desync=0.2, max_sample_gap=0.2
     )
     assert errors == []
 
@@ -414,7 +418,7 @@ def test_validate_cli_detects_truncated_stream(tmp_path):
         text=True,
     )
     assert result.returncode == 1
-    assert "episodes/0: stream durations differ by 1.99s > 1.0s" in result.stderr
+    assert "episodes/0: stream durations differ by 1.99s > 0.2s" in result.stderr
 
     meta = yaml.safe_load((tmp_path / "metadata.yaml").read_text())
     assert [(ep["id"], ep["valid"]) for ep in meta["episodes"]] == [
@@ -589,3 +593,50 @@ def test_validate_pose_update_metadata(tmp_path):
         {"id": "0", "success": False, "task_index": 0, "valid": False},
         {"id": "3", "success": True, "task_index": 0, "valid": True},
     ]
+
+
+def test_validate_detects_camera_frame_gap(tmp_path):
+    # A camera that stops delivering frames leaves the arms' streams intact,
+    # so only the camera's own timestamps show it.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    camera = tmp_path / "episodes" / "0" / "cameras" / "ceiling"
+    last = sorted(camera.iterdir())[-1]
+    late = int(last.stem) + 1_500_000_000
+    shutil.copy(last, camera / f"{late}.jpeg")
+
+    errors = []
+    assert not Dataset(tmp_path).validate(on_error=errors.append, max_sample_gap=1.0)
+    assert errors == [
+        "episodes/0/cameras/ceiling: 1.50s gap between samples > 1.0s"
+    ]
+
+
+def test_validate_detects_stream_stopping_early(tmp_path):
+    # The fixture's cameras all stop within 0.1s of starting while the arms
+    # run for about 3s, so every camera stops ~2.9s early.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+
+    errors = []
+    assert not Dataset(tmp_path).validate(
+        on_error=errors.append, max_stream_early_stop=1.0
+    )
+    assert errors
+    assert all("stopped" in error and "/cameras/" in error for error in errors)
+    assert Dataset(tmp_path).validate(max_stream_early_stop=10.0)
+
+
+def test_validate_detects_arm_stream_stopping_early(tmp_path):
+    # Not only cameras: an arm stream that ends early is held to the same bar.
+    shutil.copytree(DATASET_DIR, tmp_path, dirs_exist_ok=True)
+    _truncate_stream(
+        tmp_path / "episodes" / "0" / "obs" / "arms" / "left" / "state.parquet", 250
+    )
+
+    errors = []
+    assert not Dataset(tmp_path).validate(
+        on_error=errors.append, max_stream_early_stop=1.0
+    )
+    assert any(
+        error.startswith("episodes/0/obs/arms/left/state.parquet: stopped")
+        for error in errors
+    )

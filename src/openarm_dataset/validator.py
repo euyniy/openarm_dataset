@@ -38,6 +38,7 @@ class Validator:
         max_duration: float | None = None,
         max_stream_desync: float | None = None,
         max_sample_gap: float | None = None,
+        max_stream_early_stop: float | None = None,
     ):
         """Initialize Validator.
 
@@ -62,6 +63,9 @@ class Validator:
             max_sample_gap: If set, flag streams that stop recording mid-episode,
                 leaving a gap between consecutive samples longer than this
                 value (seconds).
+            max_stream_early_stop: If set, flag streams (arm or camera) that end
+                earlier than the latest stream by more than this value
+                (seconds).
 
         """
         self._dataset = dataset
@@ -73,6 +77,7 @@ class Validator:
         self._max_duration = max_duration
         self._max_stream_desync = max_stream_desync
         self._max_sample_gap = max_sample_gap
+        self._max_stream_early_stop = max_stream_early_stop
 
     def validate(self) -> bool:
         """Validate the dataset."""
@@ -104,11 +109,23 @@ class Validator:
             valid = False
         # Both checks read every stream's timestamps, so they share one read -
         # and neither being asked for means not reading them at all.
-        if self._max_stream_desync is not None or self._max_sample_gap is not None:
+        if (
+            self._max_stream_desync is not None
+            or self._max_sample_gap is not None
+            or self._max_stream_early_stop is not None
+        ):
             streams = self._stream_timestamps(episode)
             if not self._validate_stream_desync(episode, streams):
                 valid = False
-            if not self._validate_sample_gaps(streams):
+            cameras = (
+                self._camera_timestamps(episode)
+                if self._max_sample_gap is not None
+                or self._max_stream_early_stop is not None
+                else []
+            )
+            if not self._validate_stream_early_stop(episode, streams + cameras):
+                valid = False
+            if not self._validate_sample_gaps(streams + cameras):
                 valid = False
         return valid
 
@@ -310,6 +327,31 @@ class Validator:
                 )
         return streams
 
+    def _camera_timestamps(
+        self, episode: Episode
+    ) -> list[tuple[str, Path, np.ndarray]]:
+        """Every camera of the episode as (episode-relative key, path, timestamps).
+
+        Kept apart from `_stream_timestamps`: cameras drop frames on their own,
+        but they start and stop a little off the arms, so they are not held to
+        the span comparison, only to the gap and early-stop checks.
+        """
+        cameras = []
+        for name in self._dataset.camera_names:
+            camera = self._dataset.load_camera(name, episode)
+            # A camera with no frames is left to the presence check.
+            if camera.num_frames == 0:
+                continue
+            timestamps = np.rint(np.array(camera.load_timestamps()) * 1e9)
+            cameras.append(
+                (
+                    f"cameras/{name}",
+                    camera.tar_path or camera.base_path,
+                    timestamps.astype(np.int64),
+                )
+            )
+        return cameras
+
     def _validate_stream_desync(
         self, episode: Episode, streams: list[tuple[str, Path, np.ndarray]]
     ) -> bool:
@@ -337,6 +379,35 @@ class Validator:
             f"({shortest[0]}={shortest[1]:.2f}s, {longest[0]}={longest[1]:.2f}s)"
         )
         return False
+
+    def _validate_stream_early_stop(
+        self,
+        episode: Episode,
+        streams: list[tuple[str, Path, np.ndarray]],
+    ) -> bool:
+        """Check that no stream quits well before the others end.
+
+        Any stream can die mid-recording - an arm's feedback, its action, a
+        camera - and leave a gap-free stream that is just short. Every stream
+        is held to the end of the latest one. The threshold is loose because
+        streams normally stop a little before or after each other.
+        """
+        if self._max_stream_early_stop is None:
+            return True
+        streams = [stream for stream in streams if len(stream[2])]
+        if len(streams) < 2:
+            return True
+        end = max(timestamps[-1] for _, _, timestamps in streams)
+        valid = True
+        for key, _, timestamps in streams:
+            early = (end - timestamps[-1]) / 1e9
+            if early > self._max_stream_early_stop:
+                self._report_error(
+                    f"episodes/{episode['id']}/{key}: stopped {early:.2f}s before "
+                    f"the end of the episode > {self._max_stream_early_stop}s"
+                )
+                valid = False
+        return valid
 
     def _validate_sample_gaps(
         self, streams: list[tuple[str, Path, np.ndarray]]

@@ -171,6 +171,7 @@ class Dataset:
         max_duration: float | None = None,
         max_stream_desync: float | None = None,
         max_sample_gap: float | None = None,
+        max_stream_early_stop: float | None = None,
     ) -> bool:
         """Validate this dataset.
 
@@ -195,6 +196,9 @@ class Dataset:
             max_sample_gap: If set, flag streams that stop recording
                 mid-episode, leaving a gap between consecutive samples longer
                 than this value (seconds).
+            max_stream_early_stop: If set, flag streams (arm or camera) that end
+                earlier than the latest stream by more than this value
+                (seconds).
 
         Returns:
             ``True`` if the dataset is valid, ``False`` otherwise.
@@ -213,6 +217,7 @@ class Dataset:
             max_duration=max_duration,
             max_stream_desync=max_stream_desync,
             max_sample_gap=max_sample_gap,
+            max_stream_early_stop=max_stream_early_stop,
         )
         valid = validator.validate()
         return valid

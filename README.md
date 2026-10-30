@@ -173,8 +173,9 @@ openarm-dataset-validate <input> \
     [--qpos-absmax RADIAN]         # default 6.28
     [--min-duration SECOND]        # default 2.0
     [--max-duration SECOND]        # default none (disabled)
-    [--max-stream-desync SECOND]   # default 1.0
-    [--max-sample-gap SECOND]      # default 1.0
+    [--max-stream-desync SECOND]   # default 0.2
+    [--max-sample-gap SECOND]      # default 0.2
+    [--max-stream-early-stop SECOND]  # default 1.0
 ```
 
 Every episode is checked for `null` and `NaN` values, and for having any `obs`
@@ -193,6 +194,10 @@ that stops and resumes, which keeps the span intact but leaves a hole in the
 middle. Neither is visible file by file: each parquet is complete and free of
 `null`. The duration checks do not see it either, since they measure `obs` and
 so report a truncated stream as a short episode rather than a broken one.
+`--max-sample-gap` also covers each camera, whose frames can drop while the
+arms keep reporting; cameras are not held to `--max-stream-desync`, since they
+start and stop a little off the arms. `--max-stream-early-stop` is the loose
+check for any stream, arm or camera, that quits well before the latest one ends.
 
 In addition, `--qpos-absmax` flags `qpos` values whose absolute value exceeds
 the threshold, `--qpos-jump-threshold` flags `qpos` frame-to-frame deltas above

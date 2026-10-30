@@ -80,13 +80,22 @@ def main():
         "time, differing by more than this "
         "(default: %(default)s, 'none' to disable)",
         type=_threshold,
-        default=1.0,
+        default=0.2,
         metavar="SECOND",
     )
     parser.add_argument(
         "--max-sample-gap",
         help="Flag streams that stop recording mid-episode, leaving a gap "
         "between consecutive samples longer than this "
+        "(default: %(default)s, 'none' to disable)",
+        type=_threshold,
+        default=0.2,
+        metavar="SECOND",
+    )
+    parser.add_argument(
+        "--max-stream-early-stop",
+        help="Flag streams (arm or camera) that end earlier than the latest "
+        "stream by more than this "
         "(default: %(default)s, 'none' to disable)",
         type=_threshold,
         default=1.0,
@@ -103,6 +112,7 @@ def main():
         max_duration=args.max_duration,
         max_stream_desync=args.max_stream_desync,
         max_sample_gap=args.max_sample_gap,
+        max_stream_early_stop=args.max_stream_early_stop,
     )
     if not valid:
         sys.exit(1)
